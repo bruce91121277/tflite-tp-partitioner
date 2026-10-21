@@ -100,9 +100,10 @@ they do not certify NPU numerical equivalence.
 
 ## License
 
-No license has been selected. No LICENSE file is included, and publication of
-the source does not grant a license to use, modify, or redistribute it. See
-[docs/license-status.md](docs/license-status.md).
+This project is licensed under the **Apache License, Version 2.0**.
+See [LICENSE](LICENSE) for the full terms and [docs/license-status.md](docs/license-status.md)
+for scope and third-party component notes. Model weights, MediaTek SDKs, and
+other third-party tools are **not** relicensed by this project.
 
 ## Contributing
 
