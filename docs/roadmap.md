@@ -1,30 +1,26 @@
-# Roadmap
+# TP2 and TP4 roadmap
 
-This roadmap describes intended work, not implemented or verified functionality.
+## TP2
 
-## Milestone 1 — Public-source readiness
-- Review source ownership, employer/IP obligations, and third-party license restrictions.
-- Export only independently publishable graph partitioning code into a fresh Git history.
-- Remove private model files, proprietary SDK artifacts, credentials, internal fixtures, and identifying infrastructure details.
-- Add a suitable OSI-approved license only after publication rights are confirmed.
-- Provide pip-installable CLI, synthetic fixtures, documentation, and CI.
+- Define and validate the row-reduce accumulator, cross-rank reduction order,
+  rounding, saturation, and requantization contract.
+- Close the row-reduce numerical gap with exact comparisons on reproducible
+  synthetic cases and authorized hardware captures.
+- Extend verification from isolated row-reduce boundaries to chained
+  candidate activations.
+- Verify P128 and D1 Full32 NPU behavior.
 
-## Milestone 2 — TP4 numerical correctness
-- Reproduce the outstanding nondegenerate MLP discrepancy on the same NPU backend.
-- Investigate dequantization, tensor width, fusion, rounding, and quantization metadata.
-- Develop a **general** graph rewrite; do not hard-code fixture-specific output corrections.
-- Establish P128 and D1 Layer0 correctness on independent, nondegenerate test fixtures.
-- Expand to all 32 layers with per-rank, per-stage golden comparisons.
+## TP4
 
-## Milestone 3 — TP2 and collective correctness
-- Verify output-sharded projections and input-sharded O/Down projections.
-- Establish accumulator width, bias ownership, reduction order, rounding, saturation, and requantization behavior.
-- Run full-profile TP2 tests with fail-closed numerical gates.
+- Complete Phase 3C analysis of FP32 Dequantize differences.
+- Resolve the observed 117 INT16 mismatch case and add a minimized regression
+  test.
+- Verify P128 and D1 Full32 NPU behavior across all required outputs.
+- Confirm distributed transport and end-to-end execution separately from
+  graph partitioning.
 
-## Milestone 4 — Generalization
-- Parameterize token profiles, KV/context capacity, layer count, and TP degree.
-- Investigate TP8 and portable hardware-independent validation.
-- Measure compiled binary size, effective INT4 bytes, memory, and actual runtime latency.
+## Release gate
 
-## Definitions of done
-A structural pass is **not** a numerical pass. Numerical release requires traceable model and fixture hashes, full input/output mapping, same-backend canonical references, and zero mismatches at all mandatory comparison points. Unmeasured profiles remain NOT_RUN.
+Keep the release marked Experimental until model-bound host checks and
+full-output NPU exactness pass for the documented profiles. Compiler acceptance
+and unit tests alone do not satisfy this gate.

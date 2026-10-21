@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tflite-tp-partitioner"
+version = "0.1.0"
+description = "Experimental TP2/TP4 graph partitioning for W4A16 TFLite models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<3",
+  "flatbuffers>=24.3,<26",
+  "tflite>=2.18,<3",
+]
+
+[project.scripts]
+tflite-tp = "tflite_tp.cli:main"
+tflite-tp-verify = "tflite_tp_mediatek.npu_verify.cli:main"
+
+[tool.setuptools]
+packages = ["tflite_tp", "tflite_tp_mediatek", "tflite_tp_mediatek.npu_verify"]
+
+[tool.setuptools.package-dir]
+tflite_tp = "src/tflite_tp"
+tflite_tp_mediatek = "backends/mediatek/tflite_tp_mediatek"
+"tflite_tp_mediatek.npu_verify" = "backends/mediatek/tflite_tp_mediatek/npu_verify"

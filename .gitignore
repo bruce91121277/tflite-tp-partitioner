@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv*/
 venv/
 build/
 dist/
@@ -14,6 +15,7 @@ dist/
 *.log
 *.tmp
 *.bak
+.coverage
 .env
 .env.*
 !.env.example
@@ -22,14 +24,16 @@ artifacts/
 staging/
 captures/
 checkpoints/
+.publication_*/
 
-# Proprietary / large binary artifacts (publish separately only after review)
+# Proprietary or large artifacts
 *.tflite
 *.dla
 *.pte
 *.pt
 *.pth
 *.safetensors
+*.gguf
 *.onnx
 *.npz
 *.npy
@@ -37,6 +41,16 @@ checkpoints/
 *.tar
 *.tar.gz
 *.zip
+*.whl
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
 
 # Local credentials
 *.pem

@@ -1,0 +1,261 @@
+{
+  "audit": "public-source-safety-scan-v1",
+  "file_sha256": [
+    {
+      "bytes": 19,
+      "path": ".gitattributes",
+      "sha256": "d60f352d0db1404c70afb4bb8b2ca3fd1c610572aa40720e8a0b7baa7885418c"
+    },
+    {
+      "bytes": 556,
+      "path": ".github/workflows/tests.yml",
+      "sha256": "f52d7f8d97155e82d400bc3eb73288af0f92699abab6de0afe4dabead7dd3229"
+    },
+    {
+      "bytes": 517,
+      "path": ".gitignore",
+      "sha256": "30390ebc0fb216ca473b4443eacd77392c167b8689b1c030eb8a25ee9b447bce"
+    },
+    {
+      "bytes": 894,
+      "path": "CONTRIBUTING.md",
+      "sha256": "f300ed8000f88d25ae91b5fcfcefefcbc45476c94c8f7c94647aa0b711a843da"
+    },
+    {
+      "bytes": 4464,
+      "path": "README.md",
+      "sha256": "1291d210b301ecd2d84edb76724c4cb50291b31a58667dbbed274a47ed1908b7"
+    },
+    {
+      "bytes": 436,
+      "path": "SECURITY.md",
+      "sha256": "0c2585564ff9d010bf9eba97d9ad3ad93f1ede66bc614b277124de271e8ffc0d"
+    },
+    {
+      "bytes": 1124,
+      "path": "backends/mediatek/README.md",
+      "sha256": "c1cdfe6b1fccb919775f38294215fef6b1cb6d9ed0821bbfe72b7336e3916983"
+    },
+    {
+      "bytes": 69,
+      "path": "backends/mediatek/tflite_tp_mediatek/__init__.py",
+      "sha256": "a5111f9d50a6645e787f8d614418cfd7b47705c435d7207becd254c9468bbf19"
+    },
+    {
+      "bytes": 216,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/__init__.py",
+      "sha256": "87fd326926ce4da5b1690ff2de9d78a1cbfc6d26327ae6fd744cc0fc0f3c96d1"
+    },
+    {
+      "bytes": 9678,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/capture_adapter.py",
+      "sha256": "159d4c38c812b6356d53c9974ee1f933d184094f169e52dbfea81486b8fa4d49"
+    },
+    {
+      "bytes": 12022,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/cli.py",
+      "sha256": "2aa1db09ecdff2af27061001d3833fc9c67a2575dde5d34bdc20baca510de0e7"
+    },
+    {
+      "bytes": 4716,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/contracts.py",
+      "sha256": "ef435501b0977ca6b2c9ac66c45710125b00d6e4e9d37a8315e017e19e77f55a"
+    },
+    {
+      "bytes": 16152,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/exact.py",
+      "sha256": "d962463e48e61282c598f82ed71d8383f27c2ad0c7f182b404a6ac55787aaded"
+    },
+    {
+      "bytes": 5624,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/graph_io_mapper.py",
+      "sha256": "5d4a616bb14cfa627f3c484e8a6e034f87bb0794faf5db356d957b81c63f1d18"
+    },
+    {
+      "bytes": 11883,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/input_adapter.py",
+      "sha256": "ead706c5fbe2baa39db8804a1028a33a3a5e7cf865951dc2407ed2f14620b08c"
+    },
+    {
+      "bytes": 4201,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/report_generator.py",
+      "sha256": "8bb62fd474e5df840686a20ca722a88edfa2b66cbe45089c2daefd7652641a2a"
+    },
+    {
+      "bytes": 22175,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/stage_adapter.py",
+      "sha256": "13ee43a7d43723719b7c3d66c64583965421015806ca233f6e6904e8e168a228"
+    },
+    {
+      "bytes": 33715,
+      "path": "backends/mediatek/tflite_tp_mediatek/npu_verify/transport.py",
+      "sha256": "e8f2dce41f5a645f8f68b43976008a6c177047b9661a403a60bc8e565a963bd7"
+    },
+    {
+      "bytes": 978,
+      "path": "docs/known-limitations.md",
+      "sha256": "a75f39bbfeff2249a1874e348c3d01aa300428580c22f6d40cda5d3f7ddacb64"
+    },
+    {
+      "bytes": 281,
+      "path": "docs/license-status.md",
+      "sha256": "a1b2e999d8246909d56bf9441d6944ee17645914071bfbe448c790a021154f31"
+    },
+    {
+      "bytes": 1628,
+      "path": "docs/numerical-verification.md",
+      "sha256": "aa93ead20e97621571c8df7f46322496985113fbfcba87025c3dc20f85887f63"
+    },
+    {
+      "bytes": 962,
+      "path": "docs/roadmap.md",
+      "sha256": "1627067f09cde468fee1864fbb298d2f336d225621028632e91687dacd4ce554"
+    },
+    {
+      "bytes": 1021,
+      "path": "examples/partition_graph.py",
+      "sha256": "bb7f728b9364d19965eeb7156d56205bf73ca80077326b4b5730966abdef0c20"
+    },
+    {
+      "bytes": 782,
+      "path": "pyproject.toml",
+      "sha256": "aa303cfbd6091ddf4281d20c8de1fd5f8e67b9ad8e0d690a954f6f370d5f968a"
+    },
+    {
+      "bytes": 4656,
+      "path": "scripts/audit_publication.py",
+      "sha256": "c29e538929715ad4a78f717d6011c4d7916d0cd6e55ddea25722a51c5fe0befa"
+    },
+    {
+      "bytes": 97,
+      "path": "src/tflite_tp/__init__.py",
+      "sha256": "6bc8f2435f32ca086710137d46a1ca3df0c986687cff7746ef424295705879ea"
+    },
+    {
+      "bytes": 48,
+      "path": "src/tflite_tp/__main__.py",
+      "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
+    },
+    {
+      "bytes": 12907,
+      "path": "src/tflite_tp/analysis.py",
+      "sha256": "a30feac530b4b7ce2a2b2f65116dbed51630a062df65fbbac4f0f44557efefcf"
+    },
+    {
+      "bytes": 14207,
+      "path": "src/tflite_tp/cli.py",
+      "sha256": "5815e1a67d53c5d33f7ee74d5d7b2b0a98d8a3fbad29c3ced72cd2b889f713a2"
+    },
+    {
+      "bytes": 28737,
+      "path": "src/tflite_tp/diagnostics.py",
+      "sha256": "0eee28f379dd661e91197f3d368bb94dfec424395bfd06a865271252777d3544"
+    },
+    {
+      "bytes": 15750,
+      "path": "src/tflite_tp/discovery.py",
+      "sha256": "764ff00602387013eebf79aab44bd9d1aaa01f7c45e2e0489e7bb5fb30ee1a88"
+    },
+    {
+      "bytes": 553,
+      "path": "src/tflite_tp/errors.py",
+      "sha256": "2d41f8153422f2c47698b56ddfda6150ac654f04a853cd7a8d3e9dffdaaaa7d7"
+    },
+    {
+      "bytes": 4774,
+      "path": "src/tflite_tp/fixtures.py",
+      "sha256": "9ad65822b5b05c0bf2bb55c90f6344a0cc05dee34e0088d18d94b6cdce259bbd"
+    },
+    {
+      "bytes": 12393,
+      "path": "src/tflite_tp/flatbuffer_adapter.py",
+      "sha256": "a43af68a055cdd3bd530b3257fe5b06a07b956dd2d0b2287e7cdd8c70db09969"
+    },
+    {
+      "bytes": 81099,
+      "path": "src/tflite_tp/golden.py",
+      "sha256": "d64cf5112b59446f9dff74838d5821d2c0810eb8336d8ef4d31d347bbd663991"
+    },
+    {
+      "bytes": 16355,
+      "path": "src/tflite_tp/model.py",
+      "sha256": "3c7192982d341e93f508000b83d6529ba014f3da4c710fa7a7e654d15d08e4bf"
+    },
+    {
+      "bytes": 37668,
+      "path": "src/tflite_tp/npu_canary.py",
+      "sha256": "987776248c664d30f4eb7c5658eaf52def2521c6626c209fba11ac9584785283"
+    },
+    {
+      "bytes": 7266,
+      "path": "src/tflite_tp/packed_int4.py",
+      "sha256": "be572fcdfc0ad4e3c9559423e0928fa9f75de3ff763ca47b0c68898c27f54611"
+    },
+    {
+      "bytes": 13757,
+      "path": "src/tflite_tp/partition.py",
+      "sha256": "6e9ce831c52a8899d838bf62515c99cd280754c38fd55197dbebb4d1d76697c5"
+    },
+    {
+      "bytes": 56028,
+      "path": "src/tflite_tp/pipeline.py",
+      "sha256": "9339b5486506add9184caeda46ff673f7a6c839d22c769bf9e20af6c0be63e4f"
+    },
+    {
+      "bytes": 5581,
+      "path": "src/tflite_tp/planning.py",
+      "sha256": "e5f2fe5999fba62184fafa0fb49c54e593a066d60dbf742bd232fc1041a8eaff"
+    },
+    {
+      "bytes": 17056,
+      "path": "src/tflite_tp/release.py",
+      "sha256": "8e81121319eca7bb2a6a32492f678b99adf615b36e15b36e24f2fcd737128db2"
+    },
+    {
+      "bytes": 7651,
+      "path": "src/tflite_tp/tflite_reader.py",
+      "sha256": "f5bb7be4700b781a9415adca8b3f66244fdb6cbd874a65bf10e6651ad13c5aac"
+    },
+    {
+      "bytes": 60568,
+      "path": "src/tflite_tp/tflite_rewriter.py",
+      "sha256": "769cd68203e57e1bfe4eaef052f93c1b38d556ec922d94ff509d66a86f95ccec"
+    },
+    {
+      "bytes": 24020,
+      "path": "tests/test_discovery.py",
+      "sha256": "e1f709c0eb88df23b873eadf125606a223b4ca48380b472d599fbf1993b95f22"
+    },
+    {
+      "bytes": 20331,
+      "path": "tests/test_npu_verify.py",
+      "sha256": "f246804498af9491a4b12a85e6ce785619bfb0ea65dde5c56f8b1599ac42858e"
+    },
+    {
+      "bytes": 100041,
+      "path": "tests/test_pipeline.py",
+      "sha256": "73b2833be791e7c7ff8a6102e253b8b1256f711316d70fb3aa6234fdc769357f"
+    },
+    {
+      "bytes": 11045,
+      "path": "tests/test_planning.py",
+      "sha256": "57cd7d402732c5eedb58fbaf56ca881c5a912dc519c4b95f261d9b8416ba6eb1"
+    },
+    {
+      "bytes": 13535,
+      "path": "tests/test_rewrite.py",
+      "sha256": "221692cc9756f218c5346607e7fc1485d323c5fab537fe7e75f7a3a84ea8e5a7"
+    },
+    {
+      "bytes": 13944,
+      "path": "tests/test_tp2_golden.py",
+      "sha256": "346f16b10a2a8a487348de4cca595d137f8219435d12598fb093b04e623cf859"
+    }
+  ],
+  "files_checked": 50,
+  "prohibited_files": [],
+  "result": "PASS",
+  "scan_date": "2026-10-21",
+  "scan_scope": "git_index_staged",
+  "sensitive_content_findings": []
+}

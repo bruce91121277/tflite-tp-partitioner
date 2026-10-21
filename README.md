@@ -1,74 +1,110 @@
 # TFLite Tensor Parallel Partitioner
 
-[![Project status: experimental](https://img.shields.io/badge/status-experimental-orange)](#project-status)
+**Release status: Experimental.** This project creates TP2 and TP4 structural
+partitions from supported W4A16 TFLite graphs. Numerical release readiness has
+not been established.
 
-> **Experimental — not production-ready.** Public source publication is pending review. This repository currently documents the project and its intended architecture; it is **not yet an installable partitioner**.
+## What is implemented
 
-An open-source project in preparation for automatically partitioning quantized TFLite large-language-model graphs into **tensor-parallel rank-local components** for resource-constrained edge AI accelerators.
+- Graph discovery and validation for transformer projection graphs.
+- TP2 and TP4 component planning and graph rewriting.
+- Packed INT4 weight slicing with quantization metadata rewriting.
+- Golden comparison, bounded automatic repair, and strict release gates.
+- A Mediatek NPU verification backend with input adaptation, exact comparison,
+  output stitching, and report generation.
+- Synthetic unit tests and a GitHub Actions workflow.
 
-## Why this project?
+The partitioner does not include models, generated TFLite files, DLA binaries,
+vendor SDK files, Neuron Runtime libraries, or internal NPU captures.
 
-Quantized LLM graphs combine packed INT4 weights, per-axis quantization parameters, attention/MLP subgraphs, and KV-cache state. Splitting them across accelerator devices while preserving numerical behavior is difficult. This project aims to make graph discovery, partitioning, and **evidence-based validation** reproducible rather than relying on manual tensor-by-tensor editing.
+## Install
 
-## Scope
+Requires Python 3.10 or newer.
 
-- **TP2 / TP4** graph partitioning for quantized TFLite LLMs; TP8 is a roadmap target.
-- Discover attention, Q/K/V, output projection, MLP, residual, and KV-cache boundaries.
-- Generate per-rank components with packed INT4 weight slicing and quantization metadata preservation.
-- Validate TFLite structure, weight reconstruction, graph I/O contracts, and checksums.
-- Compare outputs against a matching canonical graph **on the same execution backend**, with explicit output mapping and complete tensor coverage.
-- Reject a numerical release when reference coverage is missing or a mismatch remains.
+    python -m venv .venv
+    python -m pip install .
+    tflite-tp --help
+    tflite-tp-verify --help
 
-Hardware-specific integration (such as MediaTek NCC/Neuron Runtime) is kept separate from portable graph transformation logic. Proprietary SDKs and model weights are not bundled.
+On Windows PowerShell, activate the environment with:
 
-## Project status
+    .\.venv\Scripts\Activate.ps1
 
-The private development prototype has generated TP2 and TP4 components and passed structural checks. **That does not establish numerical correctness.** A nondegenerate TP4 NPU regression has identified small INT16 discrepancies downstream of floating-point intermediate operations; a general fix and complete full-model verification are outstanding.
+The core package depends on NumPy, FlatBuffers, and the TFLite schema package.
+The Mediatek backend uses system OpenSSH commands and tooling supplied by the
+developer or device vendor; it does not install or bundle proprietary runtime
+libraries.
 
-| Capability | Status |
-| --- | --- |
-| Quantized TFLite graph partitioning | Prototype; source release pending |
-| Structural / INT4 reconstruction tests | Passed in development; public reproduction pending |
-| TP4 NPU bit-exact validation | **Blocked by unresolved mismatch** |
-| TP2 row-reduction semantics | **Unverified** |
-| P128 / D1 Full32 numerical equivalence | **Not established** |
-| Distributed multi-device runtime | **Not verified** |
-| Public installable release | **Not yet available** |
+## Partition a graph
 
-No prior structural pass, compiler success, or NPU invocation is presented as proof of bit-exact equivalence.
+Pass your own supported per-layer TFLite input. This example writes a TP4
+candidate for one D1 layer into a new directory:
 
-## Intended pipeline
+    python examples/partition_graph.py .\path\to\layer.tflite .\out\tp4 --tp 4 --profile D1 --expected-layers 1
 
-```text
-Canonical W4A16 TFLite
-        |
-  Semantic graph discovery
-        |
- TP2 / TP4 graph partitioning
-        |
- Rank-local TFLite components
-        |
- Structural / weight / SHA checks
-        |
- Backend compiler and executor
-        |
- Canonical-vs-rank stage comparison
-        |
- Exact gate or fail-closed block
-```
+The example can also be run with a directory containing source graphs.
+Existing output directories are rejected. For direct CLI use:
 
-## Getting started
+    tflite-tp build-tp4 --source ./models/layer.tflite --output ./out/tp4 --profile D1 --expected-layers 1
+    tflite-tp build-tp2 --source ./models/layer.tflite --output ./out/tp2 --profile D1 --expected-layers 1
 
-**The implementation is not yet published.** After a code ownership, third-party-license, and secrets review, this repository will receive installable Python sources, synthetic fixtures, a documented CLI, and reproducible automated tests.
+For graph discovery without rewriting:
 
-To follow development priorities, see [the roadmap](docs/roadmap.md). Contributions and reproducible issue reports are welcome once source publication begins.
+    tflite-tp discover --source ./models/layer.tflite --expected-layers 1 --report ./discovery.json
+
+Use only models you are authorized to process. The generated graph structure
+does not imply that the model is numerically correct on a host interpreter or
+an NPU.
+
+## Numerical status
+
+The project has **not** passed a full NPU exactness gate:
+
+- TP2 and TP4 structural partitioning is implemented.
+- An observed TP4 NPU comparison still has 117 INT16 mismatches.
+- Phase 3C is investigating differences in FP32 Dequantize behavior.
+- TP2 row-reduce has not reached numerical exactness; accumulator width,
+  reduction order, rounding, saturation, and requantization remain unproven.
+- P128 and D1 Full32 NPU Exact have not been verified.
+
+Unit tests exercise code paths with synthetic graphs, generated values, and
+mocked device calls. A passing unit test suite does not establish host Golden
+equality or NPU bit-exactness. See the
+[docs/numerical-verification.md](docs/numerical-verification.md) for the evidence levels and known gaps.
+
+## Known limitations
+
+- Experimental support is limited to the graph patterns and W4A16 INT4
+  encodings recognized by the current discovery and rewrite rules. Current
+  profiles and graph patterns are tailored to Llama 3.1 8B W4A16 TFLite exports.
+- Multiple-subgraph TFLite files are unsupported.
+- Unsupported operators, ambiguous projection roles, and incomplete graph
+  coverage fail closed.
+- Host Golden execution of vendor custom operators requires a compatible
+  interpreter supplied separately.
+- TP2 row-reduce arithmetic and full-model NPU exactness remain open.
+- The Mediatek backend requires a separately configured compiler and device;
+  hardware verification cannot run in ordinary CI.
+
+See the known-limitations and TP2/TP4 roadmap documents.
+
+## Tests
+
+Run the synthetic test suite with:
+
+    python -m unittest discover -s tests -v
+
+The CI workflow installs the package, checks both CLI help commands, and runs
+the same tests. These checks validate package structure and software behavior;
+they do not certify NPU numerical equivalence.
+
+## License
+
+No license has been selected. No LICENSE file is included, and publication of
+the source does not grant a license to use, modify, or redistribute it. See
+[docs/license-status.md](docs/license-status.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
-
-## Licensing and intellectual property
-
-No license has yet been granted for the implementation. Public visibility **does not** grant reuse rights. A compatible open-source license will be added **after ownership and publication permissions are confirmed**.
-
-No proprietary SDK binaries, model checkpoints, compiled accelerator artifacts, device credentials, private fixtures, or employer/internal materials are included or authorized for inclusion.
+See CONTRIBUTING.md and SECURITY.md. Do not submit model weights, TFLite models, DLA binaries,
+private captures, credentials, device addresses, or vendor SDK/runtime files.

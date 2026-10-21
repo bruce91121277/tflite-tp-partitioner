@@ -1,19 +1,23 @@
 # Contributing
 
-Thank you for your interest. This repository currently contains project documentation while source publication and licensing are under review.
+The project is experimental. Contributions should preserve fail-closed graph
+validation and report numerical evidence without overstating it.
 
-## Before contributing
-- Please open an issue to describe a proposed change or reproducible bug.
-- Do **not** upload proprietary MediaTek libraries, SDKs, model weights, compiled DLA artifacts, private hardware configurations, or employer-controlled datasets.
-- Use self-created, redistributable synthetic fixtures where possible.
-- Include expected and observed tensor shapes, dtypes, quantization parameters, model/tool versions, and comparison scope when reporting a numerical mismatch.
-- Do not claim a change is bit-exact without independently verifiable, same-backend evidence.
+## Development checks
 
-## Pull request guidance (once source is available)
-- Keep graph rewrites generic across ranks, layers, channels, and fixtures.
-- Add positive and negative regression tests.
-- Identify which gates were actually executed and which remain untested.
-- Avoid including secret values or personal data in logs, manifests, and screenshots.
+    python -m pip install -e .
+    python -m unittest discover -s tests -v
+    tflite-tp --help
+    tflite-tp-verify --help
+    python scripts/audit_publication.py --staged --output audit/publication_scan.json
 
-## Code of conduct
-Be respectful, constructive, and specific about technical evidence.
+Tests must use synthetic graphs, generated arrays, or mocked transport. Do not
+add private model artifacts or depend on a physical device in CI.
+
+## Data and security
+
+Do not commit model weights, TFLite models, DLA binaries, runtime libraries,
+private NPU captures, fixture exports, SSH configuration, keys, tokens,
+passwords, workstation paths, device IP addresses, or license materials.
+Use synthetic fixtures and sanitized reports. Run the publication audit on the
+exact tree before every release.
