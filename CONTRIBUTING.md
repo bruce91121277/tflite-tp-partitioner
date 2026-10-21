@@ -18,6 +18,6 @@ add private model artifacts or depend on a physical device in CI.
 
 Do not commit model weights, TFLite models, DLA binaries, runtime libraries,
 private NPU captures, fixture exports, SSH configuration, keys, tokens,
-passwords, workstation paths, device IP addresses, or license materials.
+passwords, workstation paths, device IP addresses, or confidential third-party licensing documents.
 Use synthetic fixtures and sanitized reports. Run the publication audit on the
 exact tree before every release.
