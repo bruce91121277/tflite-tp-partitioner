@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Logs and local artifacts
+*.log
+*.tmp
+*.bak
+.env
+.env.*
+!.env.example
+work/
+artifacts/
+staging/
+captures/
+checkpoints/
+
+# Proprietary / large binary artifacts (publish separately only after review)
+*.tflite
+*.dla
+*.pte
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.npz
+*.npy
+*.bin
+*.tar
+*.tar.gz
+*.zip
+
+# Local credentials
+*.pem
+*.p12
+*.key
+id_rsa*
+id_ed25519*
