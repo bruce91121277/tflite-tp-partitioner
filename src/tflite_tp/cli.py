@@ -30,6 +30,11 @@ def build_parser():
         type=int,
         help="TP4 Q/K/V width padding: 2 is the verified default; 0 explicitly disables it for diagnostics",
     )
+    parser.add_argument(
+        "--mlp-gate-dequant-width-padding-multiplier",
+        type=int,
+        help="TP4 P128 Layer0 MLP Gate rewrite: 2 enables the evidence-scoped graph rewrite; 0 disables it",
+    )
     subparsers = parser.add_subparsers(dest="command")
     discover = subparsers.add_parser("discover", help="scan one TFLite file or a directory of source graphs")
     discover.add_argument("--source", required=True, help="Canonical .tflite file or directory")
@@ -58,6 +63,11 @@ def build_parser():
                 "--fc-width-padding-multiplier",
                 type=int,
                 help="TP4 Q/K/V width padding: default 2 applies the Host-verified rule; 0 disables it for diagnostics",
+            )
+            build.add_argument(
+                "--mlp-gate-dequant-width-padding-multiplier",
+                type=int,
+                help="P128 Layer0 MLP Gate width padding: 2 enables the scoped rewrite; 0 disables it",
             )
     prepare_canary = subparsers.add_parser(
         "prepare-npu-canary",
@@ -183,6 +193,15 @@ def main(argv=None):
                         "only 2 (verified) or 0 (explicitly disabled for diagnostics) is accepted",
                     )
                 build_args["fc_width_padding_multiplier"] = multiplier or None
+                mlp_multiplier = args.mlp_gate_dequant_width_padding_multiplier
+                if mlp_multiplier is None and profile == "P128":
+                    mlp_multiplier = 2
+                if mlp_multiplier not in (None, 0, 2):
+                    raise ToolError(
+                        "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
+                        "only multiplier 2 or explicit disable 0 is supported",
+                    )
+                build_args["mlp_gate_dequant_width_padding_multiplier"] = mlp_multiplier or None
                 build_args["discovery_report"] = discovery_report
             manifest = builder(args.source, args.output, **build_args)
         except ToolError as exc:
@@ -206,6 +225,7 @@ def main(argv=None):
             "source_coverage": manifest.get("source_coverage"),
             "mismatch_count": manifest.get("mismatch_count"),
             "auto_repair_report": manifest.get("auto_repair_report"),
+            "mlp_gate_dequant_width_padding_rule": manifest.get("mlp_gate_dequant_width_padding_rule"),
             "output": args.output,
         }, indent=2, sort_keys=True))
         return 0
@@ -217,6 +237,11 @@ def main(argv=None):
             padding_multiplier = 2
         if padding_multiplier not in (None, 0, 2):
             parser.error("--fc-width-padding-multiplier accepts only 2 or 0")
+        mlp_multiplier = args.mlp_gate_dequant_width_padding_multiplier
+        if mlp_multiplier is None and args.tp in ("4", "all"):
+            mlp_multiplier = 2
+        if mlp_multiplier not in (None, 0, 2):
+            parser.error("--mlp-gate-dequant-width-padding-multiplier accepts only 2 or 0")
         try:
             manifest = run_pipeline(
                 prefill=args.prefill,
@@ -230,6 +255,7 @@ def main(argv=None):
                 dry_run=args.dry_run,
                 resume=args.resume,
                 fc_width_padding_multiplier=padding_multiplier,
+                mlp_gate_dequant_width_padding_multiplier=mlp_multiplier,
             )
         except ToolError as exc:
             print(json.dumps({

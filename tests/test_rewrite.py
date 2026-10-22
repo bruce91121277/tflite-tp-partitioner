@@ -18,6 +18,7 @@ from tflite_tp.errors import ToolError  # noqa: E402
 from tflite_tp.flatbuffer_adapter import TFLiteObjectAdapter, _ObjectTable  # noqa: E402
 from tflite_tp.tflite_rewriter import (  # noqa: E402
     _apply_fc_width_padding_rule,
+    _apply_mlp_gate_dequant_width_padding_rule,
     _pad_rank_local_fc_output,
     _validate_serialized_component,
 )
@@ -168,6 +169,51 @@ class FCWidthPaddingRewriteTests(unittest.TestCase):
         )
         return model, role_operator_indices, role_output_indices
 
+    def _make_gate_dequant_model(self):
+        model, role_operator_indices, role_output_indices = self._make_fc_model(tokens=128)
+        graph = model.subgraphs[0]
+        fc = graph.operators[role_operator_indices["q"]]
+        weight_index = int(fc.inputs[1])
+        graph.tensors[weight_index].name = "mlp/gate_proj/weight"
+        gate_output_index = int(fc.outputs[0])
+        gate_output = graph.tensors[gate_output_index]
+        fp32_shape = tuple(int(value) for value in gate_output.shape)
+        fp32_index = len(graph.tensors)
+        graph.tensors.append(
+            self._object(
+                "Tensor",
+                shape=np.asarray(fp32_shape, dtype=np.int32),
+                shapeSignature=np.asarray(fp32_shape, dtype=np.int32),
+                type=tflite.TensorType.FLOAT32,
+                buffer=0,
+                name="mlp/gate_proj/dequant",
+                quantization=None,
+                isVariable=False,
+            )
+        )
+        dequant_opcode_index = len(model.operatorCodes)
+        model.operatorCodes.append(
+            self._object(
+                "OperatorCode",
+                builtinCode=tflite.BuiltinOperator.DEQUANTIZE,
+                deprecatedBuiltinCode=tflite.BuiltinOperator.DEQUANTIZE,
+                customCode=None,
+                version=2,
+            )
+        )
+        graph.operators.append(
+            self._object(
+                "Operator",
+                opcodeIndex=dequant_opcode_index,
+                inputs=np.asarray([gate_output_index], dtype=np.int32),
+                outputs=np.asarray([fp32_index], dtype=np.int32),
+                customOptions=b"",
+                customOptionsFormat=tflite.CustomOptionsFormat.FLEXBUFFERS,
+            )
+        )
+        graph.outputs = np.asarray([fp32_index], dtype=np.int32)
+        return model, weight_index, fp32_index
+
     def _round_trip(self, model):
         raw = self.adapter.export(model)
         self.assertEqual(raw[4:8], b"TFL3")
@@ -249,6 +295,76 @@ class FCWidthPaddingRewriteTests(unittest.TestCase):
         parsed = _validate_serialized_component(serialized, "padded_qkv_d1.tflite", tflite)
         self.assertEqual(len(parsed.graphs[0].operators), 6)
         self.assertEqual(sum(op.opcode == "SLICE" for op in parsed.graphs[0].operators), 3)
+
+    def test_mlp_gate_dequant_padding_slices_fp32_after_dequant(self):
+        model, weight_index, expected_output = self._make_gate_dequant_model()
+        model = self._round_trip(model)
+        graph = model.subgraphs[0]
+        layer = SimpleNamespace(
+            profile="P128",
+            layer_id=0,
+            roles={"gate": SimpleNamespace(tensor_index=weight_index)},
+        )
+        component = SimpleNamespace(name="mlp")
+
+        applied = _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, 4, 2, self.adapter)
+
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0]["stage"], "GATE_FC_PADDED_INT16_DEQUANTIZED_BEFORE_FP32_SLICE")
+        self.assertEqual(applied[0]["zero_padding_int4_bytes"], 6)
+        fc, dequant, slice_op = graph.operators
+        padded_weight = graph.tensors[int(fc.inputs[1])]
+        self.assertEqual(tuple(int(value) for value in padded_weight.shape), (6, 4))
+        self.assertEqual(bytes(model.buffers[int(padded_weight.buffer)].data), bytes((0x21, 0x43, 0x65, 0x87, 0xA9, 0xCB)) + bytes(6))
+        np.testing.assert_array_equal(
+            padded_weight.quantization.scale,
+            np.asarray([0.1, 0.2, 0.3, 0.3, 0.3, 0.3], dtype=np.float32),
+        )
+        padded_bias = graph.tensors[int(fc.inputs[2])]
+        self.assertEqual(bytes(model.buffers[int(padded_bias.buffer)].data)[-12:], bytes(12))
+        self.assertEqual(tuple(int(value) for value in graph.tensors[int(fc.outputs[0])].shape), (1, 128, 6))
+        self.assertEqual(tuple(int(value) for value in graph.tensors[int(dequant.outputs[0])].shape), (1, 128, 6))
+        self.assertEqual(tuple(int(value) for value in dequant.inputs), tuple(int(value) for value in fc.outputs))
+        self.assertEqual(tuple(int(value) for value in slice_op.inputs[:1]), tuple(int(value) for value in dequant.outputs))
+        self.assertEqual(tuple(int(value) for value in slice_op.outputs), (expected_output,))
+        self.assertEqual(tuple(int(value) for value in graph.tensors[expected_output].shape), (1, 128, 3))
+        parsed = _validate_serialized_component(self.adapter.export(model), "mlp_gate_padded.tflite", tflite)
+        self.assertEqual(
+            [op.opcode for op in parsed.graphs[0].operators],
+            ["MTKEXT_FULLY_CONNECTED", "DEQUANTIZE", "SLICE"],
+        )
+        self.assertEqual(parsed.graphs[0].outputs, (expected_output,))
+
+    def test_mlp_gate_width_rewrite_fails_closed_outside_npu_evidence_scope(self):
+        component = SimpleNamespace(name="mlp")
+        for layer, degree in (
+            (SimpleNamespace(profile="P128", layer_id=1, roles={}), 4),
+            (SimpleNamespace(profile="D1", layer_id=0, roles={}), 4),
+            (SimpleNamespace(profile="P128", layer_id=0, roles={}), 2),
+        ):
+            model, _, _ = self._make_gate_dequant_model()
+            model = self._round_trip(model)
+            with self.subTest(profile=layer.profile, layer_id=layer.layer_id, degree=degree):
+                with self.assertRaisesRegex(ToolError, "MLP_GATE_WIDTH_PADDING"):
+                    _apply_mlp_gate_dequant_width_padding_rule(
+                        model, model.subgraphs[0], layer, component, degree, 2, self.adapter
+                    )
+
+    def test_mlp_gate_width_rewrite_is_opt_in(self):
+        model, weight_index, _ = self._make_gate_dequant_model()
+        model = self._round_trip(model)
+        layer = SimpleNamespace(
+            profile="P128",
+            layer_id=0,
+            roles={"gate": SimpleNamespace(tensor_index=weight_index)},
+        )
+        self.assertEqual(
+            _apply_mlp_gate_dequant_width_padding_rule(
+                model, model.subgraphs[0], layer, SimpleNamespace(name="mlp"), 4, None, self.adapter
+            ),
+            [],
+        )
+
 
     def test_padding_rejects_unverified_or_incompatible_contracts(self):
         model, _, _ = self._make_fc_model(tokens=128)
