@@ -9,6 +9,8 @@ not been established.
 - Graph discovery and validation for transformer projection graphs.
 - TP2 and TP4 component planning and graph rewriting.
 - Packed INT4 weight slicing with quantization metadata rewriting.
+- An experimental TP4 P128 Layer0 MLP Gate width rewrite, restricted to the
+  only profile/layer covered by saved NPU component evidence.
 - Golden comparison, bounded automatic repair, and strict release gates.
 - A Mediatek NPU verification backend with input adaptation, exact comparison,
   output stitching, and report generation.
@@ -74,9 +76,12 @@ development candidate has demonstrated a **component-scoped** improvement:
   recomputed saved, SHA-matched results; it performed **zero fresh NPU
   invocations**. Two of the three fixtures gave nonzero MLP outputs, but
   real-prompt nondegenerate MLP coverage is still missing.
-- **Publication scope:** the Phase 3C automatic rewrite is currently in
-  the local development worktree and has **not yet been synchronized into
-  this public branch**. The public package is not a release of that fix.
+- **Source scope:** the MLP Gate rewrite is exposed through the public
+  TP4 build path for P128 Layer0 only. D1, TP2, and other layers are not
+  covered by this rewrite.
+- **Candidate identity:** the saved exact comparisons belong to their
+  recorded model SHA. A newly generated public candidate must be recompiled,
+  run, and compared on the same NPU backend before it can be called NPU Exact.
 - **Still blocked:** integrated Layer0, D1, P128/D1 Full32 NPU exactness,
   TP2 row-reduce numerical semantics, and multi-device runtime verification.
   The underlying NPU microkernel behavior is not confirmed.
@@ -98,6 +103,8 @@ equality or full-model NPU bit-exactness.
   coverage fail closed.
 - Host Golden execution of vendor custom operators requires a compatible
   interpreter supplied separately.
+- The experimental MLP Gate rewrite is structural until its generated
+  candidate SHA receives a fresh same-backend NPU comparison.
 - TP2 row-reduce arithmetic and full-model NPU exactness remain open.
 - The Mediatek backend requires a separately configured compiler and device;
   hardware verification cannot run in ordinary CI.

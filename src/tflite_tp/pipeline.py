@@ -33,6 +33,13 @@ _PROFILE_INPUTS = (
 )
 
 
+def _scoped_mlp_gate_padding(degree, profile, requested_multiplier):
+    """Limit the NPU-evidence-backed Gate rewrite to its verified profile."""
+    if requested_multiplier is None or degree != 4 or profile != "P128":
+        return None
+    return requested_multiplier
+
+
 def _write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,6 +372,7 @@ def _auto_repair_tp4_candidate(
     runner,
     max_repairs,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     """Rebuild TP4 candidates from a SHA-bound canonical source, then retest."""
     initial_report_path = Path(candidate_root) / manifest.get("golden_report_path", "")
@@ -399,6 +407,9 @@ def _auto_repair_tp4_candidate(
                 expected_layers=expected_layers,
                 discovery_report=source_report,
                 fc_width_padding_multiplier=fc_width_padding_multiplier,
+                mlp_gate_dequant_width_padding_multiplier=_scoped_mlp_gate_padding(
+                    4, profile, mlp_gate_dequant_width_padding_multiplier
+                ),
             )
         except ToolError:
             return {}
@@ -786,6 +797,7 @@ def run_pipeline(
     expected_layers=32,
     golden_runner=None,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     """Run discovery, build candidate TFLites, and evaluate release eligibility."""
     if tensor_parallel not in (2, 4, "all"):
@@ -805,6 +817,19 @@ def run_pipeline(
             raise ToolError("FC_WIDTH_PADDING_PROFILE_UNSUPPORTED", "FC width padding requires a TP4 candidate")
         else:
             fc_width_padding_multiplier = multiplier
+    if mlp_gate_dequant_width_padding_multiplier is not None:
+        multiplier = int(mlp_gate_dequant_width_padding_multiplier)
+        if multiplier == 0:
+            mlp_gate_dequant_width_padding_multiplier = None
+        elif multiplier != 2:
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
+                "only multiplier 2 has saved TP4 P128 MLP component NPU evidence; use 0 to disable",
+            )
+        elif tensor_parallel not in (4, "all"):
+            raise ToolError("MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED", "MLP Gate rewrite requires TP4")
+        else:
+            mlp_gate_dequant_width_padding_multiplier = multiplier
     if quant.lower() != "w4a16":
         raise ToolError("QUANT_PROFILE_UNSUPPORTED", "only --quant w4a16 is supported")
     if max_repairs < 0:
@@ -860,6 +885,7 @@ def run_pipeline(
             "dry_run": bool(dry_run),
             "resume": bool(resume),
             "fc_width_padding_multiplier": fc_width_padding_multiplier,
+            "mlp_gate_dequant_width_padding_multiplier": mlp_gate_dequant_width_padding_multiplier,
         },
         "source_discovery": {
             profile: report.to_dict(include_quant_values=False)
@@ -965,6 +991,18 @@ def run_pipeline(
                                 expected_padding,
                             ),
                         )
+                    expected_mlp_padding = _scoped_mlp_gate_padding(
+                        degree, profile, mlp_gate_dequant_width_padding_multiplier
+                    )
+                    observed_mlp_padding = manifest.get("mlp_gate_dequant_width_padding_rule", {}).get("multiplier")
+                    if observed_mlp_padding != expected_mlp_padding:
+                        raise ToolError(
+                            "RESUME_MLP_GATE_WIDTH_PADDING_MISMATCH",
+                            "candidate uses multiplier {} but current request requires {}".format(
+                                observed_mlp_padding,
+                                expected_mlp_padding,
+                            ),
+                        )
                     resumed = True
                 else:
                     build_options = {
@@ -975,6 +1013,11 @@ def run_pipeline(
                     if degree == 4:
                         build_options["fc_width_padding_multiplier"] = (
                             fc_width_padding_multiplier if profile in ("P128", "D1") else None
+                        )
+                        build_options["mlp_gate_dequant_width_padding_multiplier"] = (
+                            _scoped_mlp_gate_padding(
+                                degree, profile, mlp_gate_dequant_width_padding_multiplier
+                            )
                         )
                     manifest = builders[degree](
                         source_path,
@@ -1067,6 +1110,11 @@ def run_pipeline(
                                         fc_width_padding_multiplier
                                         if profile in ("P128", "D1")
                                         else None
+                                    ),
+                                    mlp_gate_dequant_width_padding_multiplier=(
+                                        _scoped_mlp_gate_padding(
+                                            degree, profile, mlp_gate_dequant_width_padding_multiplier
+                                        )
                                     ),
                                 )
                         except ToolError as exc:

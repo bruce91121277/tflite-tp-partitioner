@@ -76,7 +76,7 @@ controlled latency comparison.
 | Fresh NPU invokes during latest evidence audit | **0** |
 | Input/model/output lineage | Archived evidence verified against recorded SHA |
 | Graph and rank-weight audit | PASS |
-| Latest local unit testing | 101 passing tests, 27 passing subtests (not the public CI count) |
+| Latest local unit testing | 106 passing tests (private tool suite; not the public CI count) |
 | Archived checksums verified in latest report | 679 |
 
 The revised rank-model SHA values were reported as matching previously

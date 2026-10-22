@@ -18,8 +18,8 @@
   evidence: 12 comparisons / 5,505,024 INT16 elements, zero mismatches.
 - [x] Audit Gate/Up INT4 rank weight slices, bias, quantization parameters,
   and Gate FC -> Dequantize -> Slice topology.
-- [ ] Publish the Phase 3C Gate zero-padding rewrite, its generic auto-repair
-  integration, and synthetic tests from the local worktree after code audit.
+- [ ] Merge the Phase 3C Gate zero-padding rewrite, its bounded rebuild
+  integration, and synthetic regression tests after public CI and review.
 - [ ] Restore authorized EVK SSH and confirm an idle device; rerun a controlled
   NPU invocation of the current SHA-bound model and fixture.
 - [ ] Obtain a trustworthy, real-token-prompt-derived fixture with nonzero

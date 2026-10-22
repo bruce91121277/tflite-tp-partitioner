@@ -22,8 +22,9 @@ counts are not zero. A compiler success is not NPU verification.
 ## Current evidence status (2026-10-22)
 
 - TP2 and TP4 graph-partitioning code exists in the public experimental
-  project. The latest Phase 3C MLP Gate rewrite is not yet committed to
-  this public branch.
+  project. The Phase 3C MLP Gate rewrite is being integrated into the public
+  TP4 build API with an explicit P128 Layer0 scope guard. Publication and
+  unit-test results do not validate newly generated artifacts on NPU.
 - A nondegenerate **original TP4 P128 Layer0 Rank0 MLP** NPU output
   comparison showed **117 / 458,752 INT16 mismatches** (maximum 1 LSB;
   first [0, 4, 752], canonical 16 vs rank-local 17).
@@ -40,6 +41,9 @@ counts are not zero. A compiler success is not NPU verification.
   is quantized zero. A real-prompt-derived nondegenerate fixture remains
   required. This Phase 3C evidence recheck had **zero fresh NPU invokes**
   because SSH/idle access could not be established.
+- The saved NPU exactness evidence is SHA-bound to the historical candidate;
+  this source change does not inherit that numerical PASS. A generated
+  candidate remains NPU_UNVERIFIED until a fresh same-backend comparison.
 - The width-sensitive Dequant behavior is supported by controlled tests, but
   the root NPU microkernel / NCC fusion cause remains unconfirmed. Changing
   a graph to tap internal FP32 activations may alter compiler behavior, so

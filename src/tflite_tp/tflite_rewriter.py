@@ -379,8 +379,8 @@ def _compact_graph_buffers(model, graph):
     }
 
 
-def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, adapter, profile):
-    """Pad a sharded Q/K/V FC's output width and slice back to the rank width."""
+def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, adapter, profile, restore_slice=True):
+    """Pad a rank-local FC output, optionally preserving the padded width for a following op."""
     if int(multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
         raise ToolError(
             "FC_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
@@ -454,56 +454,57 @@ def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, ad
     graph.tensors.append(padded_output)
     op.outputs = np.asarray([padded_output_index], dtype=np.int32)
 
-    begin = np.zeros(len(output_shape), dtype="<i4")
-    size = np.asarray(output_shape, dtype="<i4")
-    begin_buffer = _append_constant_buffer(model, begin.tobytes())
-    size_buffer = _append_constant_buffer(model, size.tobytes())
+    if restore_slice:
+        begin = np.zeros(len(output_shape), dtype="<i4")
+        size = np.asarray(output_shape, dtype="<i4")
+        begin_buffer = _append_constant_buffer(model, begin.tobytes())
+        size_buffer = _append_constant_buffer(model, size.tobytes())
 
-    def shape_tensor(name, buffer_index):
-        tensor = copy.deepcopy(output)
-        tensor.name = name
-        tensor.shape = np.asarray([len(output_shape)], dtype=np.int32)
-        if getattr(tensor, "shapeSignature", None) is not None:
-            tensor.shapeSignature = np.asarray([len(output_shape)], dtype=np.int32)
-        tensor.type = int(getattr(adapter.schema.TensorType, "INT32"))
-        tensor.buffer = buffer_index
-        tensor.quantization = None
-        tensor.isVariable = False
-        return tensor
+        def shape_tensor(name, buffer_index):
+            tensor = copy.deepcopy(output)
+            tensor.name = name
+            tensor.shape = np.asarray([len(output_shape)], dtype=np.int32)
+            if getattr(tensor, "shapeSignature", None) is not None:
+                tensor.shapeSignature = np.asarray([len(output_shape)], dtype=np.int32)
+            tensor.type = int(getattr(adapter.schema.TensorType, "INT32"))
+            tensor.buffer = buffer_index
+            tensor.quantization = None
+            tensor.isVariable = False
+            return tensor
 
-    begin_index = len(graph.tensors)
-    graph.tensors.append(shape_tensor("{}/width_pad_slice_begin".format(role), begin_buffer))
-    size_index = len(graph.tensors)
-    graph.tensors.append(shape_tensor("{}/width_pad_slice_size".format(role), size_buffer))
+        begin_index = len(graph.tensors)
+        graph.tensors.append(shape_tensor("{}/width_pad_slice_begin".format(role), begin_buffer))
+        size_index = len(graph.tensors)
+        graph.tensors.append(shape_tensor("{}/width_pad_slice_size".format(role), size_buffer))
 
-    slice_builtin = int(getattr(adapter.schema.BuiltinOperator, "SLICE"))
-    slice_opcode_index = None
-    placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
-    for index, item in enumerate(model.operatorCodes):
-        builtin = int(item.builtinCode)
-        if builtin == placeholder:
-            builtin = int(item.deprecatedBuiltinCode)
-        if builtin == slice_builtin and not getattr(item, "customCode", None):
-            slice_opcode_index = index
-            break
-    if slice_opcode_index is None:
-        slice_code = _ObjectTable("OperatorCode", adapter)
-        slice_code.builtinCode = slice_builtin
-        slice_code.deprecatedBuiltinCode = slice_builtin
-        slice_code.version = 1
-        slice_code.customCode = None
-        model.operatorCodes.append(slice_code)
-        slice_opcode_index = len(model.operatorCodes) - 1
+        slice_builtin = int(getattr(adapter.schema.BuiltinOperator, "SLICE"))
+        slice_opcode_index = None
+        placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
+        for index, item in enumerate(model.operatorCodes):
+            builtin = int(item.builtinCode)
+            if builtin == placeholder:
+                builtin = int(item.deprecatedBuiltinCode)
+            if builtin == slice_builtin and not getattr(item, "customCode", None):
+                slice_opcode_index = index
+                break
+        if slice_opcode_index is None:
+            slice_code = _ObjectTable("OperatorCode", adapter)
+            slice_code.builtinCode = slice_builtin
+            slice_code.deprecatedBuiltinCode = slice_builtin
+            slice_code.version = 1
+            slice_code.customCode = None
+            model.operatorCodes.append(slice_code)
+            slice_opcode_index = len(model.operatorCodes) - 1
 
-    slice_options = _ObjectTable("SliceOptions", adapter)
-    slice_op = _ObjectTable("Operator", adapter)
-    slice_op.opcodeIndex = slice_opcode_index
-    slice_op.inputs = np.asarray([padded_output_index, begin_index, size_index], dtype=np.int32)
-    slice_op.outputs = np.asarray([output_index], dtype=np.int32)
-    slice_op.builtinOptionsType = int(getattr(adapter.schema.BuiltinOptions, "SliceOptions"))
-    slice_op.builtinOptions = slice_options
-    slice_op.customOptionsFormat = int(getattr(adapter.schema.CustomOptionsFormat, "FLEXBUFFERS", 0))
-    graph.operators.insert(operator_index + 1, slice_op)
+        slice_options = _ObjectTable("SliceOptions", adapter)
+        slice_op = _ObjectTable("Operator", adapter)
+        slice_op.opcodeIndex = slice_opcode_index
+        slice_op.inputs = np.asarray([padded_output_index, begin_index, size_index], dtype=np.int32)
+        slice_op.outputs = np.asarray([output_index], dtype=np.int32)
+        slice_op.builtinOptionsType = int(getattr(adapter.schema.BuiltinOptions, "SliceOptions"))
+        slice_op.builtinOptions = slice_options
+        slice_op.customOptionsFormat = int(getattr(adapter.schema.CustomOptionsFormat, "FLEXBUFFERS", 0))
+        graph.operators.insert(operator_index + 1, slice_op)
     return {
         "role": role,
         "source_output_width": n,
@@ -516,9 +517,162 @@ def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, ad
         "serialized_bias_bytes": len(padded_bias),
         "output_shape_before_slice": padded_shape,
         "output_shape_after_slice": output_shape,
-        "slice_operator": "SLICE",
+        "slice_operator": "SLICE" if restore_slice else None,
         "quantization_policy": "preserve_rank_scales_and_repeat_last_valid_per_axis_scale_for_zero_weight_channels",
     }
+
+
+
+
+def _append_slice_operator(model, graph, input_index, output_index, output_shape, adapter, name):
+    """Append a TFLite SLICE that restores an existing tensor's public shape."""
+    output_shape = tuple(int(value) for value in output_shape)
+    begin = np.zeros(len(output_shape), dtype="<i4")
+    size = np.asarray(output_shape, dtype="<i4")
+    begin_buffer = _append_constant_buffer(model, begin.tobytes())
+    size_buffer = _append_constant_buffer(model, size.tobytes())
+    template = graph.tensors[int(output_index)]
+
+    def shape_tensor(tensor_name, buffer_index):
+        tensor = copy.deepcopy(template)
+        tensor.name = tensor_name
+        tensor.shape = np.asarray([len(output_shape)], dtype=np.int32)
+        if getattr(tensor, "shapeSignature", None) is not None:
+            tensor.shapeSignature = np.asarray([len(output_shape)], dtype=np.int32)
+        tensor.type = int(adapter.schema.TensorType.INT32)
+        tensor.buffer = buffer_index
+        tensor.quantization = None
+        tensor.isVariable = False
+        return tensor
+
+    begin_index = len(graph.tensors)
+    graph.tensors.append(shape_tensor(name + "/begin", begin_buffer))
+    size_index = len(graph.tensors)
+    graph.tensors.append(shape_tensor(name + "/size", size_buffer))
+    slice_opcode_index = None
+    placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
+    slice_code = int(adapter.schema.BuiltinOperator.SLICE)
+    for index, item in enumerate(model.operatorCodes):
+        builtin = int(item.builtinCode)
+        if builtin == placeholder:
+            builtin = int(item.deprecatedBuiltinCode)
+        if builtin == slice_code and not getattr(item, "customCode", None):
+            slice_opcode_index = index
+            break
+    if slice_opcode_index is None:
+        code = _ObjectTable("OperatorCode", adapter)
+        code.builtinCode = slice_code
+        code.deprecatedBuiltinCode = slice_code
+        code.version = 1
+        code.customCode = None
+        model.operatorCodes.append(code)
+        slice_opcode_index = len(model.operatorCodes) - 1
+    op = _ObjectTable("Operator", adapter)
+    op.opcodeIndex = slice_opcode_index
+    op.inputs = np.asarray([int(input_index), begin_index, size_index], dtype=np.int32)
+    op.outputs = np.asarray([int(output_index)], dtype=np.int32)
+    op.builtinOptionsType = int(adapter.schema.BuiltinOptions.SliceOptions)
+    op.builtinOptions = _ObjectTable("SliceOptions", adapter)
+    op.customOptionsFormat = int(getattr(adapter.schema.CustomOptionsFormat, "FLEXBUFFERS", 0))
+    return op
+
+
+def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, degree, multiplier, adapter):
+    """Pad rank-local Gate INT4 output width before Dequantize, then slice FP32."""
+    if multiplier is None:
+        return []
+    if int(multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
+        raise ToolError(
+            "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
+            "only multiplier {} has saved NPU component evidence".format(_VERIFIED_FC_WIDTH_PADDING_MULTIPLIER),
+        )
+    if degree != 4:
+        raise ToolError("MLP_GATE_WIDTH_PADDING_PROFILE_UNSUPPORTED", "MLP Gate Dequant padding requires TP4")
+    if layer.profile != "P128" or int(layer.layer_id) != 0:
+        raise ToolError(
+            "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
+            "MLP Gate Dequant padding is verified only for TP4 P128 Layer0",
+        )
+    if component.name != "mlp":
+        return []
+
+    gate_role = getattr(layer, "roles", {}).get("gate")
+    weight_index = int(getattr(gate_role, "tensor_index", -1)) if gate_role is not None else -1
+    if weight_index < 0:
+        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "discovery did not identify the Gate weight tensor")
+    gate_matches = [
+        (index, op) for index, op in enumerate(graph.operators)
+        if len(op.inputs) == 3 and len(op.outputs) == 1 and int(op.inputs[1]) == weight_index
+    ]
+    if len(gate_matches) != 1:
+        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "expected one rank-local Gate FC from graph role mapping")
+    fc_index, fc = gate_matches[0]
+    local_gate_output = int(fc.outputs[0])
+
+    def is_dequantize(op):
+        if len(op.inputs) != 1 or len(op.outputs) != 1:
+            return False
+        code = model.operatorCodes[int(op.opcodeIndex)]
+        if getattr(code, "customCode", None):
+            return False
+        builtin = int(code.builtinCode)
+        placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
+        if builtin == placeholder:
+            builtin = int(code.deprecatedBuiltinCode)
+        return builtin == int(adapter.schema.BuiltinOperator.DEQUANTIZE)
+
+    consumers = [op for op in graph.operators if local_gate_output in tuple(int(x) for x in op.inputs)]
+    dequant_matches = [op for op in consumers if is_dequantize(op) and int(op.inputs[0]) == local_gate_output]
+    if len(consumers) != 1 or len(dequant_matches) != 1:
+        raise ToolError(
+            "MLP_GATE_DEQUANT_MAPPING_AMBIGUOUS",
+            "Gate output must have exactly one DEQUANTIZE consumer",
+        )
+    dequant = dequant_matches[0]
+    local_dequant_output = int(dequant.outputs[0])
+    local_dequant = graph.tensors[local_dequant_output]
+    local_shape = tuple(int(value) for value in np.asarray(local_dequant.shape).reshape(-1))
+    if len(local_shape) != 3:
+        raise ToolError("MLP_GATE_DEQUANT_SHAPE_UNSUPPORTED", str(local_shape))
+
+    padding_report = _pad_rank_local_fc_output(
+        model, graph, fc_index, "mlp.gate", int(multiplier), adapter, layer.profile, restore_slice=False
+    )
+    padded_gate_output = int(fc.outputs[0])
+    padded_shape = local_shape[:-1] + (local_shape[-1] * int(multiplier),)
+    padded_dequant = copy.deepcopy(local_dequant)
+    old_name = local_dequant.name.decode("utf-8") if isinstance(local_dequant.name, bytes) else str(local_dequant.name)
+    padded_dequant.name = old_name + "/width_padded"
+    padded_dequant.shape = np.asarray(padded_shape, dtype=np.int32)
+    if getattr(padded_dequant, "shapeSignature", None) is not None:
+        padded_dequant.shapeSignature = np.asarray(padded_shape, dtype=np.int32)
+    padded_dequant_index = len(graph.tensors)
+    graph.tensors.append(padded_dequant)
+    dequant.inputs = np.asarray([padded_gate_output], dtype=np.int32)
+    dequant.outputs = np.asarray([padded_dequant_index], dtype=np.int32)
+    dequant_index = next(index for index, op in enumerate(graph.operators) if op is dequant)
+    graph.operators.insert(
+        dequant_index + 1,
+        _append_slice_operator(
+            model,
+            graph,
+            padded_dequant_index,
+            local_dequant_output,
+            local_shape,
+            adapter,
+            "mlp.gate.dequant_width_slice",
+        ),
+    )
+    buffer_compaction = _compact_graph_buffers(model, graph)
+    return [{
+        **padding_report,
+        "buffer_compaction": buffer_compaction,
+        "stage": "GATE_FC_PADDED_INT16_DEQUANTIZED_BEFORE_FP32_SLICE",
+        "padded_dequant_output_shape": list(padded_shape),
+        "rank_dequant_output_shape": list(local_shape),
+        "numerical_scope": "STRUCTURAL_REWRITE_ONLY_REQUIRES_SHA_BOUND_NPU_RETEST",
+        "npu_verification_status": "NOT_VERIFIED_FOR_NEW_CANDIDATE_SHA",
+    }]
 
 
 def _apply_fc_width_padding_rule(model, graph, layer, component, degree, multiplier, adapter):
@@ -783,6 +937,7 @@ def _build_tp_layer_into(
     degree,
     schema_module=None,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     """Write one layer's rank-specific components for TP2 or TP4."""
     if layer.graph_index != 0 or len(getattr(model_object, "subgraphs", ()) or ()) != 1:
@@ -800,6 +955,18 @@ def _build_tp_layer_into(
                 "the verified width-padding rule applies only to TP4 P128 or D1",
             )
         fc_width_padding_multiplier = int(fc_width_padding_multiplier)
+    if mlp_gate_dequant_width_padding_multiplier is not None:
+        if int(mlp_gate_dequant_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
+                "only multiplier 2 has saved NPU component evidence",
+            )
+        if degree != 4 or layer.profile != "P128" or int(layer.layer_id) != 0:
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
+                "MLP Gate Dequant padding is verified only for TP4 P128 Layer0",
+            )
+        mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
     specs = derive_tp_components(model_info, layer, graph_analysis, degree=degree)
     weight_specs, weight_manifest = _prepare_projection_shards(model_object, layer, degree=degree, schema=adapter.schema)
     output_root = Path(output_directory)
@@ -829,6 +996,15 @@ def _build_tp_layer_into(
                 component,
                 degree,
                 fc_width_padding_multiplier,
+                adapter,
+            )
+            mlp_gate_dequant_width_padding = _apply_mlp_gate_dequant_width_padding_rule(
+                model,
+                graph_object,
+                layer,
+                component,
+                degree,
+                mlp_gate_dequant_width_padding_multiplier,
                 adapter,
             )
             host_scalar_shape_compatibility = _normalize_host_scalar_constant_shapes(
@@ -865,10 +1041,11 @@ def _build_tp_layer_into(
                         if tensor.dtype == "INT4"
                     ),
                     "fc_width_padding": fc_width_padding,
+                    "mlp_gate_dequant_width_padding": mlp_gate_dequant_width_padding,
                     "host_scalar_shape_compatibility": host_scalar_shape_compatibility,
                     "rank_local_nonzero_int4_weight_bytes": sum(
                         int(item["rank_local_int4_nonzero_payload_bytes"])
-                        for item in fc_width_padding
+                        for item in fc_width_padding + mlp_gate_dequant_width_padding
                     ),
                     "io": _io_contract(parsed),
                     "structural_status": "STRUCTURAL_PASS",
@@ -928,6 +1105,12 @@ def _build_tp_layer_into(
             "rule": "pad each rank-local Q/K/V output width with zero INT4 weights and zero bias, then SLICE back to the rank output width",
             "numerical_scope": "CPU_HOST_ONLY_NOT_AN_NPU_EXACTNESS_CLAIM",
         },
+        "mlp_gate_dequant_width_padding_rule": {
+            "status": "APPLIED_TO_TP4_P128_LAYER0_MLP_GATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
+            "multiplier": mlp_gate_dequant_width_padding_multiplier,
+            "rule": "zero-pad rank-local Gate INT4 output width, Dequantize padded INT16 width, then Slice FP32 back to the rank width",
+            "numerical_scope": "STRUCTURAL_REWRITE_ONLY; each new candidate SHA requires a same-backend NPU retest",
+        },
         "host_scalar_shape_compatibility": {
             "status": "NORMALIZED_SAFE_CONSTANT_SCALARS" if degree == 4 and layer.profile in ("P128", "D1") else "DISABLED",
             "rule": "one-element scalar INT16/INT32 constants consumed only as SPLIT axis operands or broadcast MUL values use shape [1] for Host importer compatibility",
@@ -968,6 +1151,7 @@ def _build_tp_layer(
     degree,
     schema_module=None,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     output_root = Path(output_directory)
     if output_root.exists():
@@ -985,6 +1169,7 @@ def _build_tp_layer(
             degree=degree,
             schema_module=schema_module,
             fc_width_padding_multiplier=fc_width_padding_multiplier,
+            mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
         )
         os.replace(str(staged_output), str(output_root))
         return manifest
@@ -1000,6 +1185,7 @@ def build_tp4_layer(
     output_directory,
     schema_module=None,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     """Build one TP4 layer transactionally."""
     return _build_tp_layer(
@@ -1011,6 +1197,7 @@ def build_tp4_layer(
         degree=4,
         schema_module=schema_module,
         fc_width_padding_multiplier=fc_width_padding_multiplier,
+        mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
     )
 
 
@@ -1028,6 +1215,7 @@ def _build_tp_directory(
     schema_module=None,
     discovery_report=None,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     """Discover and build every layer for one profile as an atomic directory."""
     source_root = Path(source_directory)
@@ -1035,6 +1223,15 @@ def _build_tp_directory(
         raise ToolError("SOURCE_NOT_FOUND", "source path does not exist: {}".format(source_root))
     if profile not in ("D1", "P128"):
         raise ToolError("PROFILE_UNSUPPORTED", "profile must be D1 or P128")
+    if mlp_gate_dequant_width_padding_multiplier is not None:
+        if int(mlp_gate_dequant_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
+            raise ToolError("MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED", "only multiplier 2 has saved NPU component evidence")
+        if degree != 4 or profile != "P128":
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
+                "MLP Gate Dequant padding is verified only for TP4 P128 Layer0",
+            )
+        mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
     if expected_layers <= 0:
         raise ToolError("EXPECTED_LAYER_COUNT_INVALID", "expected layer count must be positive")
     source_paths = [source_root] if source_root.is_file() else sorted(
@@ -1140,6 +1337,15 @@ def _build_tp_directory(
                 }
                 if fc_width_padding_multiplier is not None:
                     layer_build_options["fc_width_padding_multiplier"] = fc_width_padding_multiplier
+                if (
+                    mlp_gate_dequant_width_padding_multiplier is not None
+                    and degree == 4
+                    and profile == "P128"
+                    and layer.layer_id == 0
+                ):
+                    layer_build_options["mlp_gate_dequant_width_padding_multiplier"] = (
+                        mlp_gate_dequant_width_padding_multiplier
+                    )
                 layer_manifest = _build_tp_layer_into(
                     model_object,
                     info,
@@ -1191,6 +1397,12 @@ def _build_tp_directory(
                 "multiplier": fc_width_padding_multiplier,
                 "scope": "only TP4 P128 or D1 attention Q/K/V output-channel-sharded FC operators",
                 "numerical_scope": "CPU_HOST_ONLY_NOT_AN_NPU_EXACTNESS_CLAIM",
+            },
+            "mlp_gate_dequant_width_padding_rule": {
+                "status": "APPLIED_TO_TP4_P128_LAYER0_MLP_GATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
+                "multiplier": mlp_gate_dequant_width_padding_multiplier,
+                "scope": "TP4 P128 Layer0 MLP Gate only",
+                "numerical_scope": "STRUCTURAL_REWRITE_ONLY; new model SHA requires same-backend NPU retest",
             },
             "expected_layers": expected_layers,
             "source_coverage": coverage,
@@ -1261,6 +1473,7 @@ def build_tp4_directory(
     schema_module=None,
     discovery_report=None,
     fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
 ):
     """Build a TP4 profile using four rank-local output-channel shards."""
     return _build_tp_directory(
@@ -1272,6 +1485,7 @@ def build_tp4_directory(
         schema_module=schema_module,
         discovery_report=discovery_report,
         fc_width_padding_multiplier=fc_width_padding_multiplier,
+        mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
     )
 
 

@@ -34,9 +34,18 @@ from tflite_tp.pipeline import (
     _auto_repair_tp4_candidate,
     _finalize_tp4_golden,
     _record_golden_execution_failure,
+    _scoped_mlp_gate_padding,
 )
 from tflite_tp.partition import derive_tp4_components
 from tflite_tp.release import _validate_golden_report, evaluate_release, publish_release
+
+
+class EvidenceScopedRewriteTests(unittest.TestCase):
+    def test_mlp_gate_padding_scope_is_limited_to_tp4_p128(self):
+        self.assertEqual(_scoped_mlp_gate_padding(4, "P128", 2), 2)
+        self.assertIsNone(_scoped_mlp_gate_padding(4, "D1", 2))
+        self.assertIsNone(_scoped_mlp_gate_padding(2, "P128", 2))
+        self.assertIsNone(_scoped_mlp_gate_padding(4, "P128", None))
 
 
 class GoldenInputMappingTests(unittest.TestCase):
