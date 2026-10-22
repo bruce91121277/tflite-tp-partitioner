@@ -34,7 +34,7 @@ _PROFILE_INPUTS = (
 
 
 def _scoped_mlp_gate_padding(degree, profile, requested_multiplier):
-    """Limit the NPU-evidence-backed Gate rewrite to its verified profile."""
+    """Allow structural Gate candidates for TP4 P128; keep numerical claims SHA-scoped."""
     if requested_multiplier is None or degree != 4 or profile != "P128":
         return None
     return requested_multiplier
