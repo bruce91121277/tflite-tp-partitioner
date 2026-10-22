@@ -58,19 +58,35 @@ an NPU.
 
 ## Numerical status
 
-The project has **not** passed a full NPU exactness gate:
+The project has **not** passed a full NPU exactness gate. A Phase 3C
+development candidate has demonstrated a **component-scoped** improvement:
 
-- TP2 and TP4 structural partitioning is implemented.
-- An observed TP4 NPU comparison still has 117 INT16 mismatches.
-- Phase 3C is investigating differences in FP32 Dequantize behavior.
-- TP2 row-reduce has not reached numerical exactness; accumulator width,
-  reduction order, rounding, saturation, and requantization remain unproven.
-- P128 and D1 Full32 NPU Exact have not been verified.
+- **Unpadded baseline (TP4 P128 Layer0 Rank0 MLP):** 117 mismatches in
+  458,752 INT16 public-output elements, with a maximum difference of one LSB.
+- **Gate width rewrite (development candidate):** padding the rank-local
+  INT16 Gate output with quantized zeros to twice the width, then Dequantizing
+  and Slicing to the original rank width, produced **zero mismatches across
+  12 saved NPU comparisons, 4 ranks, 3 fixtures, and 5,505,024 INT16 elements**.
+- An independent FlatBuffer audit confirmed rank-specific Gate/Up INT4
+  weight and bias slices, quantization metadata, zero padding, and
+  FC -> Dequantize -> Slice. This is genuine rank-local weight partitioning.
+- **Evidence scope:** public MLP output only. The latest Phase 3C audit
+  recomputed saved, SHA-matched results; it performed **zero fresh NPU
+  invocations**. Two of the three fixtures gave nonzero MLP outputs, but
+  real-prompt nondegenerate MLP coverage is still missing.
+- **Publication scope:** the Phase 3C automatic rewrite is currently in
+  the local development worktree and has **not yet been synchronized into
+  this public branch**. The public package is not a release of that fix.
+- **Still blocked:** integrated Layer0, D1, P128/D1 Full32 NPU exactness,
+  TP2 row-reduce numerical semantics, and multi-device runtime verification.
+  The underlying NPU microkernel behavior is not confirmed.
+
+See [the Phase 3C evidence summary](docs/phase3c-mlp-npu-evidence.md) and
+[the numerical verification guide](docs/numerical-verification.md).
 
 Unit tests exercise code paths with synthetic graphs, generated values, and
-mocked device calls. A passing unit test suite does not establish host Golden
-equality or NPU bit-exactness. See the
-[docs/numerical-verification.md](docs/numerical-verification.md) for the evidence levels and known gaps.
+mocked device calls. Passing unit tests does not establish host Golden
+equality or full-model NPU bit-exactness.
 
 ## Known limitations
 
