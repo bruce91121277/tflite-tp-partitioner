@@ -37,6 +37,24 @@
 - [ ] Validate distributed transport and end-to-end inference separately
   from individual graph partitioning correctness.
 
+## Current model-level blockers (M1–M5 checkpoint)
+
+- [x] Validate the SHA-pinned development source bundle on authorized
+  RTX4090 Linux: 108/108 tests, zero skipped; installation, CLI smoke,
+  comparator self-test and compileall PASS (no NCC/NPU invoked).
+- [ ] Locate and register a **compatible** Canonical MTK custom-op Host
+  `TFLiteExecutor` with `simulate_fp16=false`. Require canonical/model/
+  candidate SHA and per-layer fixture checks before an actual Host Golden.
+- [ ] Execute complete Canonical and candidate P128/D1 per-layer boundary
+  comparisons; leave `MISMATCH_COUNT=null` for NOT_RUN cases.
+- [ ] Prove independently the **TP2 O/Down row-reduce integer numerical
+  contract**, including accumulator width, bias placement, reduction order,
+  rounding, saturation, scaling and requantization.
+- [ ] Preserve the separation of earlier component-scope NPU results from
+  full-model Golden/release claims.
+- [ ] Retest source changes on Linux and in public CI; a development bundle
+  test pass is not a CI result for public `main`.
+
 ## Release gate
 
 Keep the release marked Experimental until model-bound host checks and
