@@ -9,8 +9,9 @@ not been established.
 - Graph discovery and validation for transformer projection graphs.
 - TP2 and TP4 component planning and graph rewriting.
 - Packed INT4 weight slicing with quantization metadata rewriting.
-- An experimental TP4 P128 Layer0 MLP Gate width rewrite, restricted to the
-  only profile/layer covered by saved NPU component evidence.
+- An experimental TP4 P128 MLP Gate width rewrite that can generate structural
+  candidates for supported layers. Numerical verification remains SHA-bound
+  and component-scoped; candidate generation does not mark NPU Exact.
 - Golden comparison, bounded automatic repair, and strict release gates.
 - A Mediatek NPU verification backend with input adaptation, exact comparison,
   output stitching, and report generation.
@@ -60,38 +61,42 @@ an NPU.
 
 ## Numerical status
 
-The project has **not** passed a full NPU exactness gate. A Phase 3C
-development candidate has demonstrated a **component-scoped** improvement:
+The project has **not** passed a full-layer or Full32 NPU exactness gate.
 
-- **Unpadded baseline (TP4 P128 Layer0 Rank0 MLP):** 117 mismatches in
-  458,752 INT16 public-output elements, with a maximum difference of one LSB.
-- **Gate width rewrite (development candidate):** padding the rank-local
-  INT16 Gate output with quantized zeros to twice the width, then Dequantizing
-  and Slicing to the original rank width, produced **zero mismatches across
-  12 saved NPU comparisons, 4 ranks, 3 fixtures, and 5,505,024 INT16 elements**.
-- An independent FlatBuffer audit confirmed rank-specific Gate/Up INT4
-  weight and bias slices, quantization metadata, zero padding, and
-  FC -> Dequantize -> Slice. This is genuine rank-local weight partitioning.
-- **Evidence scope:** public MLP output only. The latest Phase 3C audit
-  recomputed saved, SHA-matched results; it performed **zero fresh NPU
-  invocations**. Two of the three fixtures gave nonzero MLP outputs, but
-  real-prompt nondegenerate MLP coverage is still missing.
-- **Source scope:** the MLP Gate rewrite is exposed through the public
-  TP4 build path for P128 Layer0 only. D1, TP2, and other layers are not
-  covered by this rewrite.
-- **Candidate identity:** the saved exact comparisons belong to their
-  recorded model SHA. A newly generated public candidate must be recompiled,
-  run, and compared on the same NPU backend before it can be called NPU Exact.
-- **Still blocked:** integrated Layer0, D1, P128/D1 Full32 NPU exactness,
-  TP2 row-reduce numerical semantics, and multi-device runtime verification.
-  The underlying NPU microkernel behavior is not confirmed.
+- Archived Phase 3C evidence recorded 12 saved comparisons across four ranks
+  and three fixtures: 5,505,024 INT16 MLP output elements, zero mismatches.
+  Those comparisons are tied to their archived candidate hashes and were not
+  fresh invokes in the Phase 3C audit.
+- Phase 3D ran fresh Genio 720 NPU component comparisons from a real-text
+  prompt fixture. P128 Layer0 had 36 component comparisons / 9,961,472
+  elements with zero mismatches; D1 Layer0 had 36 / 77,824 with zero
+  mismatches. These are component stitches, not full-layer public-I/O proof.
+- A fresh TP4 P128 Layer1 MLP candidate comparison used the full32 padded
+  candidate: four ranks, 1,835,008 INT16 elements, zero mismatches. Its input
+  was derived from the Layer0 stitched hidden state. The Canonical reference
+  graph had stage outputs exposed; equivalence of that instrumented graph to
+  the uninstrumented compiler path is not established. This result does not
+  prove the whole layer or Full32.
+- The latest full32 unpadded Layer0 MLP package comparison had 363 mismatches
+  in 1,835,008 elements, maximum difference 4; the first was
+  `[0, 2, 1382]` (canonical 20, rank-local 21).
+- A structural TP4 P128 build now emits the Gate width rewrite for all 32
+  layers and four ranks. Only the specific tested component outputs have NPU
+  comparison evidence; every generated candidate SHA needs its own retest.
+  D1 Gate padding and TP2 row-reduce remain unverified.
+- The P128 and D1 fixtures were built from an authored prompt and a verified
+  Llama 3.1 tokenizer/embedding asset. The upstream checkpoint revision is
+  missing from the source metadata. The P128 result is at the Layer0 input
+  boundary; the D1 fixture uses the prompt-derived KV state and current token.
+  This does not establish full-model prompt-to-output exactness.
 
-See [the Phase 3C evidence summary](docs/phase3c-mlp-npu-evidence.md) and
-[the numerical verification guide](docs/numerical-verification.md).
+The partitioner retains rank-specific INT4 weight slices and zero-only padding
+for the tested Gate rewrite. The rewrite does not change the release gate:
+full P128/D1 Layer0 and Full32 exactness, TP2 row-reduce semantics, and
+distributed-runtime verification remain open. Release remains **BLOCKED**.
 
-Unit tests exercise code paths with synthetic graphs, generated values, and
-mocked device calls. Passing unit tests does not establish host Golden
-equality or full-model NPU bit-exactness.
+Passing unit tests, FlatBuffer checks, or NCC compilation does not imply NPU
+numerical equality. See [the numerical verification guide](docs/numerical-verification.md).
 
 ## Known limitations
 
