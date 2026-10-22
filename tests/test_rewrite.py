@@ -335,10 +335,24 @@ class FCWidthPaddingRewriteTests(unittest.TestCase):
         )
         self.assertEqual(parsed.graphs[0].outputs, (expected_output,))
 
-    def test_mlp_gate_width_rewrite_fails_closed_outside_npu_evidence_scope(self):
+    def test_mlp_gate_width_rewrite_accepts_p128_layer1_as_unverified_candidate(self):
+        model, weight_index, _ = self._make_gate_dequant_model()
+        model = self._round_trip(model)
+        layer = SimpleNamespace(
+            profile="P128",
+            layer_id=1,
+            roles={"gate": SimpleNamespace(tensor_index=weight_index)},
+        )
+        applied = _apply_mlp_gate_dequant_width_padding_rule(
+            model, model.subgraphs[0], layer, SimpleNamespace(name="mlp"), 4, 2, self.adapter
+        )
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0]["npu_verification_status"], "NOT_VERIFIED_FOR_NEW_CANDIDATE_SHA")
+        self.assertEqual(applied[0]["rank_local_int4_nonzero_payload_bytes"], 6)
+
+    def test_mlp_gate_width_rewrite_fails_closed_for_other_profiles_and_tp(self):
         component = SimpleNamespace(name="mlp")
         for layer, degree in (
-            (SimpleNamespace(profile="P128", layer_id=1, roles={}), 4),
             (SimpleNamespace(profile="D1", layer_id=0, roles={}), 4),
             (SimpleNamespace(profile="P128", layer_id=0, roles={}), 2),
         ):
