@@ -63,6 +63,17 @@ an NPU.
 
 The project has **not** passed a full-layer or Full32 NPU exactness gate.
 
+- **M1–M5 Linux source validation (2026-10-22):** an independent SHA-pinned
+  development bundle passed **108/108 tests, zero skipped**, on RTX4090
+  Linux; the full local suite passed 111. Installation, both CLI help
+  commands, comparator self-test, and compileall also passed. **No NCC/NPU
+  execution occurred in this checkpoint.** The full real-model Golden is
+  **NOT_RUN** because a compatible Canonical MTK custom-op Host Executor
+  is not registered; TP2 O/Down row-reduce semantics remain unproven.
+  `MISMATCH_COUNT=null` is not an Exact PASS. This checkpoint's
+  `RELEASE_GATE=FAIL` / `REAL_MODEL_NOT_VERIFIED`. See
+  [M1–M5 Linux checkpoint](docs/m1-m5-linux-checkpoint-20261022.md).
+
 - Archived Phase 3C evidence recorded 12 saved comparisons across four ranks
   and three fixtures: 5,505,024 INT16 MLP output elements, zero mismatches.
   Those comparisons are tied to their archived candidate hashes and were not
