@@ -8,8 +8,14 @@
 - Multiple-subgraph TFLite models are unsupported.
 - Vendor custom operators need a compatible host interpreter for host Golden
   execution. That interpreter is not installed or included by this package.
-- TP4 NPU results include an observed case with 117 INT16 mismatches. Phase
-  3C is investigating FP32 Dequantize differences.
+- TP4 P128 Layer0 Rank0 MLP originally had 117 INT16 output mismatches.
+  A Phase 3C development rewrite achieves zero mismatches for four Rank MLP
+  public outputs across 12 saved SHA-matched NPU comparisons (5,505,024
+  elements); this does not validate full Layer0, D1, or Full32. The tested
+  rewrite source has not yet been synchronized into public main.
+- The Phase 3C report reuses archived NPU captures (zero fresh invokes);
+  a real-prompt nondegenerate fixture, fresh NPU invocation, and full-stage
+  integration remain outstanding. NPU microkernel causality is unconfirmed.
 - TP2 row-reduce numerical exactness is incomplete. Reduction arithmetic and
   requantization details remain unproven.
 - P128 and D1 Full32 NPU Exact have not been verified.
