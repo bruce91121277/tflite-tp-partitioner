@@ -33,7 +33,7 @@ def build_parser():
     parser.add_argument(
         "--mlp-gate-dequant-width-padding-multiplier",
         type=int,
-        help="TP4 P128 Layer0 MLP Gate rewrite: 2 enables the evidence-scoped graph rewrite; 0 disables it",
+        help="TP4 P128 MLP Gate structural candidate rewrite: 2 enables it; each candidate SHA requires NPU retest; 0 disables it",
     )
     subparsers = parser.add_subparsers(dest="command")
     discover = subparsers.add_parser("discover", help="scan one TFLite file or a directory of source graphs")
@@ -67,7 +67,7 @@ def build_parser():
             build.add_argument(
                 "--mlp-gate-dequant-width-padding-multiplier",
                 type=int,
-                help="P128 Layer0 MLP Gate width padding: 2 enables the scoped rewrite; 0 disables it",
+                help="P128 MLP Gate width padding candidate: 2 enables it; each candidate SHA requires NPU retest; 0 disables it",
             )
     prepare_canary = subparsers.add_parser(
         "prepare-npu-canary",
