@@ -49,6 +49,24 @@ counts are not zero. A compiler success is not NPU verification.
   and requantization remain unproven. Distributed runtime is not verified.
   **Release remains BLOCKED.**
 
+## M1–M5 source-bundle validation (2026-10-22)
+
+The maintainer separately verified a SHA-pinned development source/test
+archive on RTX4090 Linux (Python 3.12.3): **108/108 tests passed, 0 skipped**,
+with isolated package install, two CLI smoke checks, comparator self-test,
+and compileall. The full local test suite passed 111. No NCC build or NPU
+invoke was part of this checkpoint. These are **source/contract tests**, not
+real-model Exact gates. See the [M1–M5 checkpoint](m1-m5-linux-checkpoint-20261022.md).
+
+The complete P128/D1 TP2/TP4 real-model Golden remains **NOT_RUN** because the
+required compatible Canonical MTK custom-op Host `TFLiteExecutor` is missing.
+The gate requires `simulate_fp16=false`, exact candidate/canonical/source
+SHA mapping, valid per-layer fixtures, and complete bitwise output-boundary
+coverage. Missing Golden returns `MISMATCH_COUNT=null`, never zero.
+TP2 O/Down row-reduce accumulator, ordering, bias, rounding, saturation and
+requantization semantics remain **UNPROVEN**. This checkpoint's model gate is
+**FAIL / REAL_MODEL_NOT_VERIFIED**.
+
 NPU evidence must bind the exact model and candidate hashes, input fixture
 hashes, output contracts, backend identity, and complete mismatch counts.
 Internal taps are diagnostic unless their effect on the compiled computation
