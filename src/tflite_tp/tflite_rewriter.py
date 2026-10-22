@@ -584,14 +584,14 @@ def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, d
     if int(multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
         raise ToolError(
             "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-            "only multiplier {} has saved NPU component evidence".format(_VERIFIED_FC_WIDTH_PADDING_MULTIPLIER),
+            "only multiplier {} is supported; every new candidate SHA requires same-backend NPU retest".format(_VERIFIED_FC_WIDTH_PADDING_MULTIPLIER),
         )
     if degree != 4:
         raise ToolError("MLP_GATE_WIDTH_PADDING_PROFILE_UNSUPPORTED", "MLP Gate Dequant padding requires TP4")
-    if layer.profile != "P128" or int(layer.layer_id) != 0:
+    if layer.profile != "P128":
         raise ToolError(
             "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
-            "MLP Gate Dequant padding is verified only for TP4 P128 Layer0",
+            "structural MLP Gate padding candidates are limited to TP4 P128; other profiles remain unsupported",
         )
     if component.name != "mlp":
         return []
@@ -959,12 +959,12 @@ def _build_tp_layer_into(
         if int(mlp_gate_dequant_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-                "only multiplier 2 has saved NPU component evidence",
+                "only multiplier 2 is supported; every new candidate SHA requires same-backend NPU retest",
             )
-        if degree != 4 or layer.profile != "P128" or int(layer.layer_id) != 0:
+        if degree != 4 or layer.profile != "P128":
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
-                "MLP Gate Dequant padding is verified only for TP4 P128 Layer0",
+                "structural MLP Gate padding candidates are limited to TP4 P128; other profiles remain unsupported",
             )
         mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
     specs = derive_tp_components(model_info, layer, graph_analysis, degree=degree)
@@ -1106,7 +1106,7 @@ def _build_tp_layer_into(
             "numerical_scope": "CPU_HOST_ONLY_NOT_AN_NPU_EXACTNESS_CLAIM",
         },
         "mlp_gate_dequant_width_padding_rule": {
-            "status": "APPLIED_TO_TP4_P128_LAYER0_MLP_GATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
+            "status": "APPLIED_TO_TP4_P128_MLP_GATE_STRUCTURAL_CANDIDATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
             "multiplier": mlp_gate_dequant_width_padding_multiplier,
             "rule": "zero-pad rank-local Gate INT4 output width, Dequantize padded INT16 width, then Slice FP32 back to the rank width",
             "numerical_scope": "STRUCTURAL_REWRITE_ONLY; each new candidate SHA requires a same-backend NPU retest",
@@ -1225,11 +1225,11 @@ def _build_tp_directory(
         raise ToolError("PROFILE_UNSUPPORTED", "profile must be D1 or P128")
     if mlp_gate_dequant_width_padding_multiplier is not None:
         if int(mlp_gate_dequant_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
-            raise ToolError("MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED", "only multiplier 2 has saved NPU component evidence")
+            raise ToolError("MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED", "only multiplier 2 is supported; every new candidate SHA requires same-backend NPU retest")
         if degree != 4 or profile != "P128":
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
-                "MLP Gate Dequant padding is verified only for TP4 P128 Layer0",
+                "structural MLP Gate padding candidates are limited to TP4 P128",
             )
         mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
     if expected_layers <= 0:
@@ -1341,7 +1341,6 @@ def _build_tp_directory(
                     mlp_gate_dequant_width_padding_multiplier is not None
                     and degree == 4
                     and profile == "P128"
-                    and layer.layer_id == 0
                 ):
                     layer_build_options["mlp_gate_dequant_width_padding_multiplier"] = (
                         mlp_gate_dequant_width_padding_multiplier
@@ -1399,9 +1398,9 @@ def _build_tp_directory(
                 "numerical_scope": "CPU_HOST_ONLY_NOT_AN_NPU_EXACTNESS_CLAIM",
             },
             "mlp_gate_dequant_width_padding_rule": {
-                "status": "APPLIED_TO_TP4_P128_LAYER0_MLP_GATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
+                "status": "APPLIED_TO_TP4_P128_MLP_GATE_STRUCTURAL_CANDIDATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
                 "multiplier": mlp_gate_dequant_width_padding_multiplier,
-                "scope": "TP4 P128 Layer0 MLP Gate only",
+                "scope": "TP4 P128 structurally eligible MLP Gate components; every new candidate SHA requires its own NPU retest",
                 "numerical_scope": "STRUCTURAL_REWRITE_ONLY; new model SHA requires same-backend NPU retest",
             },
             "expected_layers": expected_layers,
