@@ -662,5 +662,24 @@ class FCWidthPaddingRewriteTests(unittest.TestCase):
             _pad_rank_local_fc_output(model, model.subgraphs[0], 0, "q", 2, self.adapter, "P128")
 
 
+class AttentionContextPaddingSemanticsTests(unittest.TestCase):
+    def test_repeated_batch_matmul_heads_then_slice_preserves_local_result(self):
+        # Small synthetic integer arithmetic checks the repeat-and-slice
+        # contract. It does not emulate MTK rounding or prove model/NPU exactness.
+        rng = np.random.default_rng(2410)
+        query = rng.integers(-3, 4, size=(1, 8, 5, 7), dtype=np.int16)
+        key = rng.integers(-3, 4, size=(1, 8, 7, 6), dtype=np.int16)
+
+        local = np.matmul(query.astype(np.int32), key.astype(np.int32))
+        tiled_query = np.tile(query, (1, 4, 1, 1)).astype(np.int32)
+        tiled_key = np.tile(key, (1, 4, 1, 1)).astype(np.int32)
+        padded = np.matmul(tiled_query, tiled_key)
+        restored = padded[:, :8, :, :]
+
+        self.assertEqual(tiled_query.shape, (1, 32, 5, 7))
+        self.assertEqual(restored.shape, (1, 8, 5, 6))
+        np.testing.assert_array_equal(restored, local)
+
+
 if __name__ == "__main__":
     unittest.main()
