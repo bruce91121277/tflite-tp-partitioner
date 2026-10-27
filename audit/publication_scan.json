@@ -102,9 +102,9 @@
       "sha256": "b58623fca8336f9fd369c4b77570a2f5258cdb525b4d133a066b30fae0933874"
     },
     {
-      "bytes": 6424,
+      "bytes": 8609,
       "path": "docs/numerical-verification.md",
-      "sha256": "3740a394521a44b774a89cfbfff0d51d2b7900359877fee03cd83761c535540c"
+      "sha256": "1db2bb13ed54e7edc316ff223dd05683a805f4c93face6be37b9b588deaa2452"
     },
     {
       "bytes": 4677,
@@ -132,9 +132,9 @@
       "sha256": "3c7105462cb7e8831a2df41b0bf697a421d46db61ff0ffdeea38936660c39d4a"
     },
     {
-      "bytes": 9341,
+      "bytes": 9139,
       "path": "README.md",
-      "sha256": "dc751e14f98d30d728e6b39635759cc4c93109dd84c36fdf0d5df1713568cba9"
+      "sha256": "7b9c74bc092e788415bc573cb752c0648f65806abb2a60426fc8781c897145e6"
     },
     {
       "bytes": 4657,
@@ -267,9 +267,9 @@
       "sha256": "57cd7d402732c5eedb58fbaf56ca881c5a912dc519c4b95f261d9b8416ba6eb1"
     },
     {
-      "bytes": 32830,
+      "bytes": 33781,
       "path": "tests/test_rewrite.py",
-      "sha256": "e7383ca63a29a50a43f3d03c3648432f96f4f8703350fabc74156eedbedff3be"
+      "sha256": "04e0d4cf293cfc3ef769d23fcbddbed3fdaacffa0d6fa62a5c149c59d6c94f15"
     },
     {
       "bytes": 13944,
