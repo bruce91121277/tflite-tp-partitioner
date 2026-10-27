@@ -19,6 +19,40 @@ NPU numerical equality are separate claims.
 Passing an earlier level does not imply a later one. Null or missing mismatch
 counts are not zero. A compiler success is not NPU verification.
 
+## M9 TP4 NPU fixture evidence (2026-10-27)
+
+- Fresh Genio 720 NPU evidence from **112 successful invokes** on an
+  authorized idle EVK. Other busy boards were skipped without disruption.
+  The 48/48 rank TFLite and 48/48 DLA SHA/size checks passed. No PTQ,
+  canonical export or shape-fix was repeated.
+- **P128 Layer0:** **0 / 14,155,776** INT16 differences across counted
+  rank output, Host stitch and repeated diagnostic checks; tested fixture
+  only, not unique element coverage. Same-backend canonical public hidden
+  output was compared with rank output.
+- **D1 Layer0:** **0 / 116,736** INT16 differences across counted rank,
+  stitch and diagnostic checks; tested fixture only.
+- Measured output contracts included attention context/post-SLICE, KV,
+  O/Residual/Norm, nonzero post-SwiGLU MLP/Down, and public hidden
+  outputs. **Gate/Up separate tap outputs were not independently verified**:
+  diagnostic NCC `--verify` failed on `MTKEXT_SILU` (node 4),
+  while `--no-verify` exited 139; no diagnostic NPU invocation occurred.
+- The earlier **117** NPU INT16 mismatches were from an **unpadded**
+  historical TP4 MLP candidate. The M9 production public outputs
+  measured zero mismatches with a different SHA and scope.
+- Host stitched real NPU rank outputs sequentially; **no concurrent
+  multi-device TP4 collective** was executed. Only Layer0 is present in
+  the current verified P128/D1 candidate/fixture bundle, so Full32,
+  end-to-end prefill/decode and TPS remain NOT_RUN.
+- Three alternating attention canary samples per variant showed
+  62.143 ms unpadded versus 71.185 ms head-pad x4 median invoke wall
+  time (+14.55%); not a throughput benchmark. Runtime peak allocation
+  and compiler fusion remain unknown.
+
+See [the M9 evidence report](m9-tp4-layer0-npu-evidence-20261027.md).
+**P128/D1 Layer0 PASS_FIXTURE_SCOPED; release BLOCKED.** Unit-test
+and Host numerical evidence cannot substitute for these NPU results,
+nor can these Layer0 results certify Full32 or distributed execution.
+
 ## M8 TP4 Host evidence (2026-10-27)
 
 The latest PR #4 P128 attention candidates were verified against the selected
