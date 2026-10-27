@@ -69,6 +69,11 @@ def build_parser():
                 type=int,
                 help="P128 MLP Gate width padding candidate: 2 enables it; each candidate SHA requires NPU retest; 0 disables it",
             )
+            build.add_argument(
+                "--attention-context-head-padding-multiplier",
+                type=int,
+                help="experimental P128 Layer0 MatMul4 head-batch rewrite: 4 enables it; each emitted SHA needs Host and NPU retest",
+            )
     prepare_canary = subparsers.add_parser(
         "prepare-npu-canary",
         help="package canonical, unpadded rank-local, and padded rank-local FC tap models",
@@ -202,6 +207,13 @@ def main(argv=None):
                         "only multiplier 2 or explicit disable 0 is supported",
                     )
                 build_args["mlp_gate_dequant_width_padding_multiplier"] = mlp_multiplier or None
+                attention_multiplier = args.attention_context_head_padding_multiplier
+                if attention_multiplier not in (None, 0, 4):
+                    raise ToolError(
+                        "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
+                        "only multiplier 4 or explicit disable 0 is supported",
+                    )
+                build_args["attention_context_head_padding_multiplier"] = attention_multiplier or None
                 build_args["discovery_report"] = discovery_report
             manifest = builder(args.source, args.output, **build_args)
         except ToolError as exc:
@@ -226,6 +238,7 @@ def main(argv=None):
             "mismatch_count": manifest.get("mismatch_count"),
             "auto_repair_report": manifest.get("auto_repair_report"),
             "mlp_gate_dequant_width_padding_rule": manifest.get("mlp_gate_dequant_width_padding_rule"),
+            "attention_context_head_padding_rule": manifest.get("attention_context_head_padding_rule"),
             "output": args.output,
         }, indent=2, sort_keys=True))
         return 0

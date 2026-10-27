@@ -12,6 +12,9 @@ not been established.
 - An experimental TP4 P128 MLP Gate width rewrite that can generate structural
   candidates for supported layers. Numerical verification remains SHA-bound
   and component-scoped; candidate generation does not mark NPU Exact.
+- An opt-in TP4 P128 Layer0 attention-context rewrite. It locates the
+  INT16 BatchMatMul from tensor contracts and its unique ADD consumer, and
+  fails closed when the graph match is ambiguous.
 - Golden comparison, bounded automatic repair, and strict release gates.
 - A Mediatek NPU verification backend with input adaptation, exact comparison,
   output stitching, and report generation.
@@ -62,6 +65,30 @@ an NPU.
 ## Numerical status
 
 The project has **not** passed a full-layer or Full32 NPU exactness gate.
+
+### M8 TP4 Host status (2026-10-27)
+
+- TP2 and TP4 structural partitioning are implemented for supported graphs.
+- The latest PR #4 P128 attention candidates were SHA-checked and executed
+  with all 24 TP4 rank components in a sequential Host harness. Nine unique
+  public boundaries matched the saved Canonical Host capture bitwise across
+  5,242,880 INT16 elements on the tested fixture. The four one-LSB attention
+  context differences seen in M6 did not recur.
+- D1 Layer0 was also chained sequentially across all 24 rank components.
+  Nine public boundaries matched the saved Canonical Host capture across
+  40,960 INT16 elements on its tested fixture.
+- These are fixture-scoped Host results against saved, tapped Canonical
+  captures. Tap equivalence to the uninstrumented execution path is not
+  established. The harness simulates manifest-ordered all-gathers; it is not
+  a distributed runtime. Internal Q/K/V and Gate/Up outputs are not fully
+  covered.
+- The MTK Host executor used `simulate_fp16=false`. No M8 NPU invocation was
+  made because the EVK remained busy. **TP4 NPU still has an observed 117
+  INT16 mismatch** in the P128 Layer0 MLP comparison. Phase 3C is investigating
+  the FP32 Dequantize difference; the attention rewrite does not resolve it.
+- TP2 Row-Reduce Numerical Exact remains incomplete. P128/D1 NPU Exact and
+  Full32 NPU Exact remain unverified. **Release remains Experimental / BLOCKED.**
+  See the [numerical verification report](docs/numerical-verification.md).
 
 - **M1–M5 Linux source validation (2026-10-22):** an independent SHA-pinned
   development bundle passed **108/108 tests, zero skipped**, on RTX4090
@@ -114,6 +141,9 @@ numerical equality. See [the numerical verification guide](docs/numerical-verifi
 - Experimental support is limited to the graph patterns and W4A16 INT4
   encodings recognized by the current discovery and rewrite rules. Current
   profiles and graph patterns are tailored to Llama 3.1 8B W4A16 TFLite exports.
+- The experimental attention-context head-padding rewrite is limited to TP4
+  P128 Layer0 with expected_layers=1. The latest candidates matched one Host
+  fixture; NPU verification remains outstanding.
 - Multiple-subgraph TFLite files are unsupported.
 - Unsupported operators, ambiguous projection roles, and incomplete graph
   coverage fail closed.
