@@ -19,6 +19,43 @@ NPU numerical equality are separate claims.
 Passing an earlier level does not imply a later one. Null or missing mismatch
 counts are not zero. A compiler success is not NPU verification.
 
+## M8 TP4 Host evidence (2026-10-27)
+
+The latest PR #4 P128 attention candidates were verified against the selected
+Canonical and fixture manifests before invocation. The M6 Python 3.11.17
+environment was recovered; MTK Converter 8.16.0 `TFLiteExecutor` imported and
+executed with `simulate_fp16=false`.
+
+The P128 Host harness executed all 24 rank-component models in six sequential
+stages, using manifest-ordered all-gathers between stages. Nine unique public
+boundaries were compared with the saved tapped Canonical Host capture:
+5,242,880 INT16 elements, zero mismatches, maximum absolute difference zero.
+This includes the attention context after the padded BatchMatMul and SLICE.
+The four one-LSB attention-context mismatches recorded by M6 were not
+reproduced for these latest candidates on this fixture. The internal padded
+BatchMatMul output was not separately exposed and compared.
+
+The D1 harness also executed all 24 rank-component models sequentially. Its
+nine public boundaries compared with the saved tapped Canonical Host capture
+over 40,960 INT16 elements with zero mismatches. D1 input embeds, position,
+mask, current token, and rank-local KV followed the saved D1 fixture contract.
+
+These results are fixture-scoped Host evidence, not NPU verification or a
+distributed runtime test. The reference values came from saved instrumented
+Canonical captures; equivalence of every tapped internal value to the
+untapped compiler path is not established. Internal Q/K/V and Gate/Up outputs
+remain outside the candidate public I/O coverage. No NPU invoke was made
+because the EVK was busy. The previously observed 117 INT16 P128 Layer0 MLP
+NPU mismatches remain unresolved; Phase 3C is investigating FP32 Dequantize.
+TP2 Row-Reduce and Full32 remain open, and release remains Experimental /
+BLOCKED.
+
+Static NCC comparison accepted the four padded attention candidates. Per rank,
+the TFLite file grew by 1,064 bytes (0.0164%) and the generated DLA size grew
+by 1,841 bytes (0.0288%). The logical padded INT16 tensor is 1 MiB, versus
+256 KiB before padding. NCC did not report whether the BatchMatMul was fused
+or eliminated. Peak allocation and NPU latency were not measured.
+
 ## M7 TP4 evidence (2026-10-27)
 
 - Reused SHA-verified, untapped P128 and D1 Canonical TFLite files. No PTQ or
