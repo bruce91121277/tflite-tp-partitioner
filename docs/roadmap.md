@@ -12,6 +12,34 @@
 
 ## TP4
 
+### M9 completion and M10 priorities (2026-10-27)
+
+- [x] Recover a SHA-verified untapped P128/D1 Layer0 Canonical pair
+  and generate SHA-verified four-rank component candidates.
+- [x] Validate the latest P128/D1 Layer0 outputs against Canonical
+  on a real Genio 720 NPU fixture: **112 fresh invokes; zero mismatch**
+  across the recorded rank/stitch/tap rechecks.
+- [x] Verify nonzero post-SwiGLU MLP, Down and public hidden output
+  comparisons at Layer0 on the tested NPU fixture.
+- [ ] Recover or build the **matching 32-layer W4A16 P128/D1 Canonical**
+  lineage; preserve PTQ/quantization contract and SHA evidence; avoid
+  unnecessary PTQ rebuild when valid intermediates exist.
+- [ ] Generate and validate matching TP4 P128/D1 candidates and
+  fixtures for **L1–L31**, with repeatable layer-by-layer NPU Goldens.
+- [ ] Run bounded Full32 checks in batches: L1–L3, L4–L15, L16–L31,
+  then D1 Full32 and realistic prompt-to-output prefill/decode.
+- [ ] Find a supported NCC/Neuron method for independent Gate/Up
+  tensor observation that does not alter production numerical semantics;
+  `MTKEXT_SILU` diagnostic tap currently fails compilation.
+- [ ] Exercise **real concurrent 4-EVK** collectives and KV flow, not
+  merely Host stitches of individual NPU captures; skip busy hardware.
+- [ ] Profile/optimize the attention head-padding penalty (M9 per-rank
+  short canary: +14.55% median invoke wall time). Compare end-to-end
+  TPS only with controlled concurrent-runtime measurements.
+- [ ] Keep complete model release marked **BLOCKED / Experimental**
+  until full-profile numerical and distributed execution gates pass.
+
+
 - [x] Find the M7 P128 Layer0 Host attention-context first difference and
   verify a head-batch shape rewrite on one SHA-bound Host fixture.
 - [x] Locate the attention-context BatchMatMul by tensor contract and direct
