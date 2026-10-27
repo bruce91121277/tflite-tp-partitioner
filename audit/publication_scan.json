@@ -102,9 +102,9 @@
       "sha256": "b58623fca8336f9fd369c4b77570a2f5258cdb525b4d133a066b30fae0933874"
     },
     {
-      "bytes": 8609,
+      "bytes": 9197,
       "path": "docs/numerical-verification.md",
-      "sha256": "1db2bb13ed54e7edc316ff223dd05683a805f4c93face6be37b9b588deaa2452"
+      "sha256": "fc539e2f3d5c268f07d015a944c21d24092468414be935637a2857e89c7e7ed0"
     },
     {
       "bytes": 4677,
@@ -132,9 +132,9 @@
       "sha256": "3c7105462cb7e8831a2df41b0bf697a421d46db61ff0ffdeea38936660c39d4a"
     },
     {
-      "bytes": 9139,
+      "bytes": 9382,
       "path": "README.md",
-      "sha256": "7b9c74bc092e788415bc573cb752c0648f65806abb2a60426fc8781c897145e6"
+      "sha256": "a78021ab442d125ccb0d670547745b54227bcb30d714f3da1a50c939d92fcfdc"
     },
     {
       "bytes": 4657,
@@ -284,3 +284,4 @@
   "scan_scope": "working_tree",
   "sensitive_content_findings": []
 }
+
