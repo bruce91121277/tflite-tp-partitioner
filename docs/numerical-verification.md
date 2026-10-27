@@ -35,15 +35,24 @@ The four one-LSB attention-context mismatches recorded by M6 were not
 reproduced for these latest candidates on this fixture. The internal padded
 BatchMatMul output was not separately exposed and compared.
 
+The uninstrumented P128 Canonical model was then invoked directly through the
+same MTK Host Executor with the same five verified fixture inputs. Its three
+public outputs (`hidden_states_0`, `curr_keys_0`, and `curr_values_0`) matched
+both the saved tapped Canonical capture and the TP4 sequential stitch over
+786,432 INT16 elements with zero mismatches. This confirms tap equivalence for
+these three public outputs on this fixture. It does not establish equivalence
+for internal tapped stages or other inputs.
+
 The D1 harness also executed all 24 rank-component models sequentially. Its
 nine public boundaries compared with the saved tapped Canonical Host capture
 over 40,960 INT16 elements with zero mismatches. D1 input embeds, position,
 mask, current token, and rank-local KV followed the saved D1 fixture contract.
 
 These results are fixture-scoped Host evidence, not NPU verification or a
-distributed runtime test. The reference values came from saved instrumented
-Canonical captures; equivalence of every tapped internal value to the
-untapped compiler path is not established. Internal Q/K/V and Gate/Up outputs
+distributed runtime test. P128's three uninstrumented public outputs were
+compared directly; P128 internal stage references and D1 references remain
+saved tapped Canonical captures. Equivalence of every internal tapped value
+to the untapped path is not established. Internal Q/K/V and Gate/Up outputs
 remain outside the candidate public I/O coverage. No NPU invoke was made
 because the EVK was busy. The previously observed 117 INT16 P128 Layer0 MLP
 NPU mismatches remain unresolved; Phase 3C is investigating FP32 Dequantize.
@@ -118,14 +127,14 @@ or eliminated. Peak allocation and NPU latency were not measured.
   and requantization remain unproven. Distributed runtime is not verified.
   **Release remains BLOCKED.**
 
-## M1–M5 source-bundle validation (2026-10-22)
+## M1-M5 source-bundle validation (2026-10-22)
 
 The maintainer separately verified a SHA-pinned development source/test
 archive on RTX4090 Linux (Python 3.12.3): **108/108 tests passed, 0 skipped**,
 with isolated package install, two CLI smoke checks, comparator self-test,
 and compileall. The full local test suite passed 111. No NCC build or NPU
 invoke was part of this checkpoint. These are **source/contract tests**, not
-real-model Exact gates. See the [M1–M5 checkpoint](m1-m5-linux-checkpoint-20261022.md).
+real-model Exact gates. See the [M1-M5 checkpoint](m1-m5-linux-checkpoint-20261022.md).
 
 The complete P128/D1 TP2/TP4 real-model Golden remains **NOT_RUN** because the
 required compatible Canonical MTK custom-op Host `TFLiteExecutor` is missing.

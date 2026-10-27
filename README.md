@@ -77,11 +77,14 @@ The project has **not** passed a full-layer or Full32 NPU exactness gate.
 - D1 Layer0 was also chained sequentially across all 24 rank components.
   Nine public boundaries matched the saved Canonical Host capture across
   40,960 INT16 elements on its tested fixture.
-- These are fixture-scoped Host results against saved, tapped Canonical
-  captures. Tap equivalence to the uninstrumented execution path is not
-  established. The harness simulates manifest-ordered all-gathers; it is not
-  a distributed runtime. Internal Q/K/V and Gate/Up outputs are not fully
-  covered.
+- The uninstrumented P128 Canonical was also executed with the same fixture.
+  Its three public outputs matched both the saved tapped capture and the TP4
+  sequential stitch over 786,432 INT16 elements with zero mismatches. This
+  confirms public-output tap equivalence for this fixture; internal tap
+  equivalence and other inputs remain unverified. D1 still uses saved tapped
+  Canonical references. The harness simulates manifest-ordered all-gathers;
+  it is not a distributed runtime. Internal Q/K/V and Gate/Up outputs are not
+  fully covered.
 - The MTK Host executor used `simulate_fp16=false`. No M8 NPU invocation was
   made because the EVK remained busy. **TP4 NPU still has an observed 117
   INT16 mismatch** in the P128 Layer0 MLP comparison. Phase 3C is investigating
@@ -90,7 +93,7 @@ The project has **not** passed a full-layer or Full32 NPU exactness gate.
   Full32 NPU Exact remain unverified. **Release remains Experimental / BLOCKED.**
   See the [numerical verification report](docs/numerical-verification.md).
 
-- **M1–M5 Linux source validation (2026-10-22):** an independent SHA-pinned
+- **M1-M5 Linux source validation (2026-10-22):** an independent SHA-pinned
   development bundle passed **108/108 tests, zero skipped**, on RTX4090
   Linux; the full local suite passed 111. Installation, both CLI help
   commands, comparator self-test, and compileall also passed. **No NCC/NPU
@@ -99,7 +102,7 @@ The project has **not** passed a full-layer or Full32 NPU exactness gate.
   is not registered; TP2 O/Down row-reduce semantics remain unproven.
   `MISMATCH_COUNT=null` is not an Exact PASS. This checkpoint's
   `RELEASE_GATE=FAIL` / `REAL_MODEL_NOT_VERIFIED`. See
-  [M1–M5 Linux checkpoint](docs/m1-m5-linux-checkpoint-20261022.md).
+  [M1-M5 Linux checkpoint](docs/m1-m5-linux-checkpoint-20261022.md).
 
 - Archived Phase 3C evidence recorded 12 saved comparisons across four ranks
   and three fixtures: 5,505,024 INT16 MLP output elements, zero mismatches.
