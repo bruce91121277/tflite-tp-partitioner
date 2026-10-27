@@ -93,7 +93,7 @@ The project has **not** passed a full-layer or Full32 NPU exactness gate.
   Full32 NPU Exact remain unverified. **Release remains Experimental / BLOCKED.**
   See the [numerical verification report](docs/numerical-verification.md).
 
-- **M1?5 Linux source validation (2026-10-22):** an independent SHA-pinned
+- **M1–M5 Linux source validation (2026-10-22):** an independent SHA-pinned
   development bundle passed **108/108 tests, zero skipped**, on RTX4090
   Linux; the full local suite passed 111. Installation, both CLI help
   commands, comparator self-test, and compileall also passed. **No NCC/NPU
@@ -102,7 +102,7 @@ The project has **not** passed a full-layer or Full32 NPU exactness gate.
   is not registered; TP2 O/Down row-reduce semantics remain unproven.
   `MISMATCH_COUNT=null` is not an Exact PASS. This checkpoint's
   `RELEASE_GATE=FAIL` / `REAL_MODEL_NOT_VERIFIED`. See
-  [M1?5 Linux checkpoint](docs/m1-m5-linux-checkpoint-20261022.md).
+  [M1–M5 Linux checkpoint](docs/m1-m5-linux-checkpoint-20261022.md).
 
 - Archived Phase 3C evidence recorded 12 saved comparisons across four ranks
   and three fixtures: 5,505,024 INT16 MLP output elements, zero mismatches.
@@ -181,4 +181,3 @@ other third-party tools are **not** relicensed by this project.
 
 See CONTRIBUTING.md and SECURITY.md. Do not submit model weights, TFLite models, DLA binaries,
 private captures, credentials, device addresses, or vendor SDK/runtime files.
-
