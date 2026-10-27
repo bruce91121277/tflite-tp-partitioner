@@ -99,7 +99,7 @@ def main():
 
     report = {
         "audit": "public-source-safety-scan-v1",
-        "scan_date": "2026-10-21",
+        "scan_date": "2026-10-27",
         "scan_scope": "git_index_staged" if args.staged else "working_tree",
         "result": "PASS" if not prohibited_files and not content_findings else "FAIL",
         "files_checked": len(checked),

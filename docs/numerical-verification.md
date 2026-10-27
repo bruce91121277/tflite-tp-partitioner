@@ -19,6 +19,38 @@ NPU numerical equality are separate claims.
 Passing an earlier level does not imply a later one. Null or missing mismatch
 counts are not zero. A compiler success is not NPU verification.
 
+## M7 TP4 evidence (2026-10-27)
+
+- Reused SHA-verified, untapped P128 and D1 Canonical TFLite files. No PTQ or
+  export was run because matching Canonical files already existed. Their
+  original checkpoint revision and calibration manifest were not recoverable
+  from the inspected lineage, so this is not a reproducible PTQ claim.
+- Fresh MTK `TFLiteExecutor` runs used `simulate_fp16=false`. An isolated
+  P128 Layer0 Host variant initially found four one-LSB differences at the
+  current-token attention BatchMatMul. Rank-local operands were bitwise equal
+  to the Canonical head slices. Running the MatMul with the Canonical 32-head
+  batch shape, then slicing the local 8 heads, removed those differences on
+  the tested fixture. Its reported P128 component outputs then matched exactly
+  after stitching. Inputs at component boundaries came from Canonical; this
+  does not prove a chained distributed Layer0 execution. The latest four
+  public-builder attention hashes differ from the diagnostic variants. They
+  passed structural validation and NCC 8.2.22 compilation for
+  `mdla5.3,edma3.6`, but have not been run through Host. The latest runner
+  attempt stopped before model invocation because the active RTX shell had no
+  `python` launcher and its system `python3` lacked FlatBuffers and MTK
+  Converter. The diagnostic result does not transfer to those files.
+- D1 Layer0 Host component outputs and stitches matched exactly on the tested
+  fixture. This does not prove integrated D1 public-I/O behavior.
+- NCC accepted both Canonical models and all 48 current rank-component SHA
+  values for the recorded target, including the four latest P128 attention
+  replacements. Compiler acceptance is not an NPU result.
+- No M7 NPU comparison was run because the EVK was occupied by an existing
+  runtime process. The observed TP4 P128 Layer0 MLP NPU result still has 117
+  INT16 mismatches. Phase 3C is investigating the FP32 Dequantize difference;
+  the M7 Host attention rewrite does not address that mismatch.
+- TP2 Row-Reduce Numerical Exact remains incomplete. P128/D1 Full32 NPU Exact
+  remains unverified. Release status is **Experimental / BLOCKED**.
+
 ## Current evidence status (2026-10-22)
 
 - Phase 3C archived component evidence: TP4 P128 MLP public output,

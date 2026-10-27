@@ -597,16 +597,29 @@ def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, d
         return []
 
     gate_role = getattr(layer, "roles", {}).get("gate")
-    weight_index = int(getattr(gate_role, "tensor_index", -1)) if gate_role is not None else -1
-    if weight_index < 0:
-        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "discovery did not identify the Gate weight tensor")
-    gate_matches = [
-        (index, op) for index, op in enumerate(graph.operators)
-        if len(op.inputs) == 3 and len(op.outputs) == 1 and int(op.inputs[1]) == weight_index
-    ]
-    if len(gate_matches) != 1:
-        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "expected one rank-local Gate FC from graph role mapping")
-    fc_index, fc = gate_matches[0]
+    source_operator_index = int(getattr(gate_role, "operator_index", -1)) if gate_role is not None else -1
+    source_to_local = {
+        int(source_index): local_index
+        for local_index, source_index in enumerate(getattr(component, "operator_indices", ()))
+    }
+    if source_operator_index not in source_to_local:
+        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "component does not contain the discovered Gate FC")
+    fc_index = source_to_local[source_operator_index]
+    if fc_index < 0 or fc_index >= len(graph.operators):
+        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "Gate FC operator remap is out of range")
+    fc = graph.operators[fc_index]
+    if len(fc.inputs) != 3 or len(fc.outputs) != 1:
+        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "discovered Gate FC has an unsupported rank-local signature")
+    weight_index = int(fc.inputs[1])
+    expected_weight_name = getattr(gate_role, "tensor_name", "")
+    actual_weight_name = getattr(graph.tensors[weight_index], "name", "")
+    if isinstance(actual_weight_name, bytes):
+        actual_weight_name = actual_weight_name.decode("utf-8")
+    if expected_weight_name and str(actual_weight_name) != str(expected_weight_name):
+        raise ToolError(
+            "MLP_GATE_FC_MAPPING_AMBIGUOUS",
+            "remapped Gate FC weight name does not match discovery: {} != {}".format(actual_weight_name, expected_weight_name),
+        )
     local_gate_output = int(fc.outputs[0])
 
     def is_dequantize(op):
@@ -695,6 +708,301 @@ def _apply_fc_width_padding_rule(model, graph, layer, component, degree, multipl
     for item in result:
         item["buffer_compaction"] = buffer_compaction
     return list(reversed(result))
+
+
+def _operator_builtin_code(model, operator, schema):
+    opcode_index = int(operator.opcodeIndex)
+    if opcode_index < 0 or opcode_index >= len(model.operatorCodes):
+        raise ToolError("ATTENTION_CONTEXT_PADDING_OPCODE_INVALID", str(opcode_index))
+    code = model.operatorCodes[opcode_index]
+    builtin = int(code.builtinCode)
+    placeholder = int(getattr(schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
+    if builtin == placeholder:
+        builtin = int(code.deprecatedBuiltinCode)
+    return code, builtin
+
+
+def _operator_custom_options_bytes(operator):
+    options = getattr(operator, "customOptions", None)
+    if options is None:
+        return b""
+    if isinstance(options, bytes):
+        return options
+    return np.asarray(options, dtype=np.uint8).tobytes()
+
+
+def _attention_tensor_quantization_signature(tensor):
+    info = _quant_info(getattr(tensor, "quantization", None))
+    if info is None:
+        return None
+    return info.scales, info.zero_points, info.quantized_dimension
+
+
+def _attention_tensor_name(tensor):
+    name = getattr(tensor, "name", b"")
+    return name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
+
+
+def _unique_attention_tensor_name(graph, name):
+    names = {_attention_tensor_name(tensor) for tensor in graph.tensors}
+    if name not in names:
+        return name.encode("utf-8")
+    suffix = 1
+    while "{}_{}".format(name, suffix) in names:
+        suffix += 1
+    return "{}_{}".format(name, suffix).encode("utf-8")
+
+
+def _append_int32_constant(model, graph, template_index, name, values):
+    template = graph.tensors[int(template_index)]
+    if int(template.type) != 2:  # TFLite INT32
+        raise ToolError("ATTENTION_CONTEXT_PADDING_CONSTANT_DTYPE_UNSUPPORTED", str(template.type))
+    values = np.asarray(values, dtype="<i4").reshape(-1)
+    tensor = copy.deepcopy(template)
+    tensor.name = _unique_attention_tensor_name(graph, name)
+    _set_shape(tensor, (len(values),))
+    tensor.quantization = None
+    tensor.isVariable = False
+    graph.tensors.append(tensor)
+    tensor_index = len(graph.tensors) - 1
+    _replace_buffer_data(model, tensor, values.tobytes())
+    return tensor_index
+
+
+def _append_attention_intermediate(graph, template_index, name, shape):
+    tensor = copy.deepcopy(graph.tensors[int(template_index)])
+    tensor.name = _unique_attention_tensor_name(graph, name)
+    _set_shape(tensor, shape)
+    tensor.buffer = 0
+    tensor.isVariable = False
+    graph.tensors.append(tensor)
+    return len(graph.tensors) - 1
+
+
+def _apply_attention_context_head_padding(model, graph, layer, component, degree, multiplier, adapter):
+    """Run the P128 current-token attention BatchMatMul at the Canonical head-batch shape.
+
+    The TP4 rank-local inputs are bitwise correct, but a Host one-LSB difference
+    was observed when the current-token BatchMatMul runs with 8 heads instead of
+    Canonical's 32. Tile both inputs across the head axis, compute the full batch
+    shape, then slice the rank-local heads back before the attention add.
+    This is an experimental P128 Layer0 Host repair and needs same-backend NPU
+    verification for every candidate SHA.
+    """
+    if multiplier is None:
+        return None
+    if int(multiplier) != 4:
+        raise ToolError(
+            "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
+            "only head-batch multiplier 4 passed the P128 Layer0 Host fixture",
+        )
+    if degree != 4 or layer.profile != "P128" or int(layer.layer_id) != 0 or component.name != "attn":
+        raise ToolError(
+            "ATTENTION_CONTEXT_PADDING_SCOPE_UNVERIFIED",
+            "the verified experimental rule applies only to TP4 P128 Layer0 attention components",
+        )
+
+    expected_batch_matmul = int(adapter.schema.BuiltinOperator.BATCH_MATMUL)
+    local_shape = (1, 8, 128, 128)
+
+    # Identify the target by the operator contract and tensor metadata. Tensor
+    # names vary across exporters and are not a reliable graph identity. The
+    # context product is the unique matching result consumed directly by ADD;
+    # same-shaped score products may instead feed CONCAT or Softmax.
+    matmul_candidates = []
+    add_builtin = int(adapter.schema.BuiltinOperator.ADD)
+    for index, operator in enumerate(graph.operators):
+        _, builtin_code = _operator_builtin_code(model, operator, adapter.schema)
+        if builtin_code != expected_batch_matmul or len(operator.inputs) != 2 or len(operator.outputs) != 1:
+            continue
+        input_indices = tuple(int(value) for value in operator.inputs)
+        output_index = int(operator.outputs[0])
+        if any(value < 0 or value >= len(graph.tensors) for value in (*input_indices, output_index)):
+            continue
+        operand_tensors = [graph.tensors[value] for value in input_indices]
+        output_tensor = graph.tensors[output_index]
+        if any(_shape(tensor) != local_shape for tensor in (*operand_tensors, output_tensor)):
+            continue
+        if any(int(tensor.type) != int(adapter.schema.TensorType.INT16) for tensor in (*operand_tensors, output_tensor)):
+            continue
+        if any(_attention_tensor_quantization_signature(tensor) is None for tensor in (*operand_tensors, output_tensor)):
+            continue
+        consumers = [
+            consumer_index
+            for consumer_index, consumer in enumerate(graph.operators)
+            if output_index in [int(value) for value in consumer.inputs]
+        ]
+        if len(consumers) != 1 or consumers[0] <= index:
+            continue
+        _, consumer_builtin = _operator_builtin_code(model, graph.operators[consumers[0]], adapter.schema)
+        if consumer_builtin != add_builtin:
+            continue
+        matmul_candidates.append((index, operator, input_indices, output_index))
+
+    if len(matmul_candidates) != 1:
+        raise ToolError(
+            "ATTENTION_CONTEXT_PADDING_MATMUL_AMBIGUOUS",
+            "expected one INT16 BATCH_MATMUL with [1,8,128,128] operands/output and a unique ADD consumer, found {}".format(
+                len(matmul_candidates)
+            ),
+        )
+    matmul_index, matmul, input_indices, output_index = matmul_candidates[0]
+    matmul_output_name = _attention_tensor_name(graph.tensors[output_index])
+    if any(_shape(graph.tensors[value]) != local_shape for value in input_indices):
+        raise ToolError(
+            "ATTENTION_CONTEXT_PADDING_SHAPE_UNSUPPORTED",
+            "expected P128 Layer0 [1,8,128,128] operands/output",
+        )
+
+    custom_tile_code = "MTKEXT_TILE"
+    tile_candidates = []
+    slice_candidates = []
+    slice_builtin = int(adapter.schema.BuiltinOperator.SLICE)
+    for operator in graph.operators:
+        code, builtin = _operator_builtin_code(model, operator, adapter.schema)
+        custom = getattr(code, "customCode", None)
+        if isinstance(custom, bytes):
+            custom = custom.decode("utf-8", "replace")
+        if custom == custom_tile_code and len(operator.inputs) == 2 and len(operator.outputs) == 1:
+            source_index = int(operator.inputs[0])
+            multiples_index = int(operator.inputs[1])
+            output_index_template = int(operator.outputs[0])
+            if any(value < 0 or value >= len(graph.tensors) for value in (source_index, multiples_index, output_index_template)):
+                continue
+            source = graph.tensors[source_index]
+            multiples = graph.tensors[multiples_index]
+            output = graph.tensors[output_index_template]
+            if (
+                int(source.type) == int(adapter.schema.TensorType.INT16)
+                and int(output.type) == int(adapter.schema.TensorType.INT16)
+                and _attention_tensor_quantization_signature(source) is not None
+                and _attention_tensor_quantization_signature(source) == _attention_tensor_quantization_signature(output)
+                and int(multiples.type) == int(adapter.schema.TensorType.INT32)
+                and len(_tensor_data(model, multiples)) > 0
+                and len(_tensor_data(model, multiples)) % 4 == 0
+            ):
+                tile_candidates.append(operator)
+        if builtin == slice_builtin and len(operator.inputs) == 3 and len(operator.outputs) == 1:
+            input_index, begin_index, size_index = (int(value) for value in operator.inputs)
+            output_index_template = int(operator.outputs[0])
+            if any(value < 0 or value >= len(graph.tensors) for value in (input_index, begin_index, size_index, output_index_template)):
+                continue
+            source = graph.tensors[input_index]
+            begin = graph.tensors[begin_index]
+            size = graph.tensors[size_index]
+            output = graph.tensors[output_index_template]
+            if (
+                int(source.type) == int(adapter.schema.TensorType.INT16)
+                and int(output.type) == int(adapter.schema.TensorType.INT16)
+                and _attention_tensor_quantization_signature(source) is not None
+                and _attention_tensor_quantization_signature(source) == _attention_tensor_quantization_signature(output)
+                and int(begin.type) == int(adapter.schema.TensorType.INT32)
+                and int(size.type) == int(adapter.schema.TensorType.INT32)
+                and len(_tensor_data(model, begin)) > 0
+                and len(_tensor_data(model, begin)) % 4 == 0
+                and len(_tensor_data(model, size)) > 0
+                and len(_tensor_data(model, size)) % 4 == 0
+            ):
+                slice_candidates.append(operator)
+    tile_contracts = {
+        (
+            int(operator.opcodeIndex),
+            _operator_custom_options_bytes(operator),
+            int(operator.customOptionsFormat or 0),
+        )
+        for operator in tile_candidates
+    }
+    slice_contracts = {
+        (int(operator.opcodeIndex), int(operator.builtinOptionsType or 0))
+        for operator in slice_candidates
+    }
+    if not tile_candidates or not slice_candidates or len(tile_contracts) != 1 or len(slice_contracts) != 1:
+        raise ToolError(
+            "ATTENTION_CONTEXT_PADDING_OPERATOR_TEMPLATE_AMBIGUOUS",
+            "expected compatible MTKEXT_TILE and SLICE templates; found {} tiles/{} contracts and {} slices/{} contracts".format(
+                len(tile_candidates), len(tile_contracts), len(slice_candidates), len(slice_contracts)
+            ),
+        )
+    tile_template = tile_candidates[0]
+    slice_template = slice_candidates[0]
+
+    tile_multiple_template = int(tile_template.inputs[1])
+    begin_template = int(slice_template.inputs[1])
+    size_template = int(slice_template.inputs[2])
+    multiple_index = _append_int32_constant(
+        model, graph, tile_multiple_template, "tp4/attention_context/head_tile_multiples", (1, 4, 1, 1)
+    )
+    begin_index = _append_int32_constant(
+        model, graph, begin_template, "tp4/attention_context/head_slice_begin", (0, 0, 0, 0)
+    )
+    size_index = _append_int32_constant(
+        model, graph, size_template, "tp4/attention_context/head_slice_size", local_shape
+    )
+    full_shape = (1, local_shape[1] * int(multiplier), local_shape[2], local_shape[3])
+    tiled_slice_index = _append_attention_intermediate(
+        graph, input_indices[0], "tp4/attention_context/tiled_operand_0", full_shape
+    )
+    tiled_values_index = _append_attention_intermediate(
+        graph, input_indices[1], "tp4/attention_context/tiled_operand_1", full_shape
+    )
+    full_output_index = _append_attention_intermediate(
+        graph, output_index, "tp4/attention_context/full_head_output", full_shape
+    )
+    local_output_index = _append_attention_intermediate(
+        graph, output_index, matmul_output_name, local_shape
+    )
+    graph.tensors[output_index].name = _unique_attention_tensor_name(
+        graph, "tp4/attention_context/unused_original_output"
+    )
+
+    tile_slice = copy.deepcopy(tile_template)
+    tile_slice.inputs = np.asarray([input_indices[0], multiple_index], dtype=np.int32)
+    tile_slice.outputs = np.asarray([tiled_slice_index], dtype=np.int32)
+    tile_values = copy.deepcopy(tile_template)
+    tile_values.inputs = np.asarray([input_indices[1], multiple_index], dtype=np.int32)
+    tile_values.outputs = np.asarray([tiled_values_index], dtype=np.int32)
+    matmul.inputs = np.asarray([tiled_slice_index, tiled_values_index], dtype=np.int32)
+    matmul.outputs = np.asarray([full_output_index], dtype=np.int32)
+    crop = copy.deepcopy(slice_template)
+    crop.inputs = np.asarray([full_output_index, begin_index, size_index], dtype=np.int32)
+    crop.outputs = np.asarray([local_output_index], dtype=np.int32)
+
+    consumers = [
+        index for index, operator in enumerate(graph.operators)
+        if index != matmul_index and output_index in [int(value) for value in operator.inputs]
+    ]
+    if len(consumers) != 1 or consumers[0] <= matmul_index:
+        raise ToolError("ATTENTION_CONTEXT_PADDING_CONSUMER_AMBIGUOUS", str(consumers))
+    consumer_index = consumers[0]
+    consumer = graph.operators[consumer_index]
+    consumer_inputs = np.asarray(consumer.inputs, dtype=np.int64).copy()
+    consumer_inputs[consumer_inputs == output_index] = local_output_index
+    consumer.inputs = consumer_inputs.astype(np.int32)
+
+    original_operators = list(graph.operators)
+    rewritten_operators = []
+    for index, operator in enumerate(original_operators):
+        if index == matmul_index:
+            rewritten_operators.extend((tile_slice, tile_values, operator))
+        elif index == consumer_index:
+            rewritten_operators.extend((crop, operator))
+        else:
+            rewritten_operators.append(operator)
+    graph.operators = rewritten_operators
+    buffer_compaction = _compact_graph_buffers(model, graph)
+    return {
+        "status": "APPLIED_TP4_P128_LAYER0_ATTENTION_CONTEXT_BATCHMATMUL_HEAD_PADDING",
+        "stage": "ATTENTION_CURRENT_TOKEN_MATMUL4",
+        "local_head_count": local_shape[1],
+        "target_head_count": full_shape[1],
+        "tile_multiples": [1, int(multiplier), 1, 1],
+        "slice_back_shape": list(local_shape),
+        "source_operands_bitwise_preserved": True,
+        "quantization_metadata_preserved": True,
+        "buffer_compaction": buffer_compaction,
+        "numerical_scope": "P128_LAYER0_MTK_HOST_FIXTURE_ONLY; NEW_SHA_REQUIRES_NPU_RETEST",
+        "npu_verification_status": "NOT_VERIFIED_FOR_NEW_CANDIDATE_SHA",
+    }
 
 
 def _normalize_host_scalar_constant_shapes(model, graph, layer, component, degree, adapter):
@@ -938,6 +1246,7 @@ def _build_tp_layer_into(
     schema_module=None,
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
+    attention_context_head_padding_multiplier=None,
 ):
     """Write one layer's rank-specific components for TP2 or TP4."""
     if layer.graph_index != 0 or len(getattr(model_object, "subgraphs", ()) or ()) != 1:
@@ -967,6 +1276,18 @@ def _build_tp_layer_into(
                 "structural MLP Gate padding candidates are limited to TP4 P128; other profiles remain unsupported",
             )
         mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
+    if attention_context_head_padding_multiplier is not None:
+        if int(attention_context_head_padding_multiplier) != 4:
+            raise ToolError(
+                "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
+                "only head-batch multiplier 4 passed the P128 Layer0 Host fixture",
+            )
+        if degree != 4 or layer.profile != "P128" or int(layer.layer_id) != 0:
+            raise ToolError(
+                "ATTENTION_CONTEXT_PADDING_SCOPE_UNVERIFIED",
+                "the experimental rule applies only to TP4 P128 Layer0",
+            )
+        attention_context_head_padding_multiplier = int(attention_context_head_padding_multiplier)
     specs = derive_tp_components(model_info, layer, graph_analysis, degree=degree)
     weight_specs, weight_manifest = _prepare_projection_shards(model_object, layer, degree=degree, schema=adapter.schema)
     output_root = Path(output_directory)
@@ -1007,6 +1328,17 @@ def _build_tp_layer_into(
                 mlp_gate_dequant_width_padding_multiplier,
                 adapter,
             )
+            attention_context_head_padding = None
+            if component.name == "attn":
+                attention_context_head_padding = _apply_attention_context_head_padding(
+                    model,
+                    graph_object,
+                    layer,
+                    component,
+                    degree,
+                    attention_context_head_padding_multiplier,
+                    adapter,
+                )
             host_scalar_shape_compatibility = _normalize_host_scalar_constant_shapes(
                 model,
                 graph_object,
@@ -1042,6 +1374,7 @@ def _build_tp_layer_into(
                     ),
                     "fc_width_padding": fc_width_padding,
                     "mlp_gate_dequant_width_padding": mlp_gate_dequant_width_padding,
+                    "attention_context_head_padding": attention_context_head_padding,
                     "host_scalar_shape_compatibility": host_scalar_shape_compatibility,
                     "rank_local_nonzero_int4_weight_bytes": sum(
                         int(item["rank_local_int4_nonzero_payload_bytes"])
@@ -1111,6 +1444,13 @@ def _build_tp_layer_into(
             "rule": "zero-pad rank-local Gate INT4 output width, Dequantize padded INT16 width, then Slice FP32 back to the rank width",
             "numerical_scope": "STRUCTURAL_REWRITE_ONLY; each new candidate SHA requires a same-backend NPU retest",
         },
+        "attention_context_head_padding_rule": {
+            "status": "APPLIED_TO_TP4_P128_LAYER0_MATMUL4" if attention_context_head_padding_multiplier is not None else "DISABLED",
+            "multiplier": attention_context_head_padding_multiplier,
+            "rule": "tile the two exact current-token attention MatMul4 operands to the Canonical 32-head batch shape, then slice the rank-local 8 heads back before the attention add",
+            "scope": "TP4 P128 Layer0 attention component only; expected_layers must be 1",
+            "numerical_scope": "HOST_FIXTURE_ONLY; every new model SHA requires same-backend NPU retest",
+        },
         "host_scalar_shape_compatibility": {
             "status": "NORMALIZED_SAFE_CONSTANT_SCALARS" if degree == 4 and layer.profile in ("P128", "D1") else "DISABLED",
             "rule": "one-element scalar INT16/INT32 constants consumed only as SPLIT axis operands or broadcast MUL values use shape [1] for Host importer compatibility",
@@ -1152,6 +1492,7 @@ def _build_tp_layer(
     schema_module=None,
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
+    attention_context_head_padding_multiplier=None,
 ):
     output_root = Path(output_directory)
     if output_root.exists():
@@ -1170,6 +1511,7 @@ def _build_tp_layer(
             schema_module=schema_module,
             fc_width_padding_multiplier=fc_width_padding_multiplier,
             mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
+            attention_context_head_padding_multiplier=attention_context_head_padding_multiplier,
         )
         os.replace(str(staged_output), str(output_root))
         return manifest
@@ -1186,6 +1528,7 @@ def build_tp4_layer(
     schema_module=None,
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
+    attention_context_head_padding_multiplier=None,
 ):
     """Build one TP4 layer transactionally."""
     return _build_tp_layer(
@@ -1198,6 +1541,7 @@ def build_tp4_layer(
         schema_module=schema_module,
         fc_width_padding_multiplier=fc_width_padding_multiplier,
         mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
+        attention_context_head_padding_multiplier=attention_context_head_padding_multiplier,
     )
 
 
@@ -1216,6 +1560,7 @@ def _build_tp_directory(
     discovery_report=None,
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
+    attention_context_head_padding_multiplier=None,
 ):
     """Discover and build every layer for one profile as an atomic directory."""
     source_root = Path(source_directory)
@@ -1232,6 +1577,18 @@ def _build_tp_directory(
                 "structural MLP Gate padding candidates are limited to TP4 P128",
             )
         mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
+    if attention_context_head_padding_multiplier is not None:
+        if int(attention_context_head_padding_multiplier) != 4:
+            raise ToolError(
+                "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
+                "only head-batch multiplier 4 passed the P128 Layer0 Host fixture",
+            )
+        if degree != 4 or profile != "P128" or expected_layers != 1:
+            raise ToolError(
+                "ATTENTION_CONTEXT_PADDING_SCOPE_UNVERIFIED",
+                "the experimental rule applies only to TP4 P128 Layer0 with expected_layers=1",
+            )
+        attention_context_head_padding_multiplier = int(attention_context_head_padding_multiplier)
     if expected_layers <= 0:
         raise ToolError("EXPECTED_LAYER_COUNT_INVALID", "expected layer count must be positive")
     source_paths = [source_root] if source_root.is_file() else sorted(
@@ -1345,6 +1702,10 @@ def _build_tp_directory(
                     layer_build_options["mlp_gate_dequant_width_padding_multiplier"] = (
                         mlp_gate_dequant_width_padding_multiplier
                     )
+                if attention_context_head_padding_multiplier is not None:
+                    layer_build_options["attention_context_head_padding_multiplier"] = (
+                        attention_context_head_padding_multiplier
+                    )
                 layer_manifest = _build_tp_layer_into(
                     model_object,
                     info,
@@ -1402,6 +1763,12 @@ def _build_tp_directory(
                 "multiplier": mlp_gate_dequant_width_padding_multiplier,
                 "scope": "TP4 P128 structurally eligible MLP Gate components; every new candidate SHA requires its own NPU retest",
                 "numerical_scope": "STRUCTURAL_REWRITE_ONLY; new model SHA requires same-backend NPU retest",
+            },
+            "attention_context_head_padding_rule": {
+                "status": "APPLIED_TO_TP4_P128_LAYER0_MATMUL4" if attention_context_head_padding_multiplier is not None else "DISABLED",
+                "multiplier": attention_context_head_padding_multiplier,
+                "scope": "TP4 P128 Layer0 attention component only; expected_layers=1",
+                "numerical_scope": "HOST_FIXTURE_ONLY; every new model SHA requires same-backend NPU retest",
             },
             "expected_layers": expected_layers,
             "source_coverage": coverage,
@@ -1473,6 +1840,7 @@ def build_tp4_directory(
     discovery_report=None,
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
+    attention_context_head_padding_multiplier=None,
 ):
     """Build a TP4 profile using four rank-local output-channel shards."""
     return _build_tp_directory(
@@ -1485,6 +1853,7 @@ def build_tp4_directory(
         discovery_report=discovery_report,
         fc_width_padding_multiplier=fc_width_padding_multiplier,
         mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
+        attention_context_head_padding_multiplier=attention_context_head_padding_multiplier,
     )
 
 

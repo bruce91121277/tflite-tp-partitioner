@@ -17,21 +17,6 @@
       "sha256": "30390ebc0fb216ca473b4443eacd77392c167b8689b1c030eb8a25ee9b447bce"
     },
     {
-      "bytes": 894,
-      "path": "CONTRIBUTING.md",
-      "sha256": "f300ed8000f88d25ae91b5fcfcefefcbc45476c94c8f7c94647aa0b711a843da"
-    },
-    {
-      "bytes": 4464,
-      "path": "README.md",
-      "sha256": "1291d210b301ecd2d84edb76724c4cb50291b31a58667dbbed274a47ed1908b7"
-    },
-    {
-      "bytes": 436,
-      "path": "SECURITY.md",
-      "sha256": "0c2585564ff9d010bf9eba97d9ad3ad93f1ede66bc614b277124de271e8ffc0d"
-    },
-    {
       "bytes": 1124,
       "path": "backends/mediatek/README.md",
       "sha256": "c1cdfe6b1fccb919775f38294215fef6b1cb6d9ed0821bbfe72b7336e3916983"
@@ -92,24 +77,44 @@
       "sha256": "e8f2dce41f5a645f8f68b43976008a6c177047b9661a403a60bc8e565a963bd7"
     },
     {
-      "bytes": 978,
+      "bytes": 921,
+      "path": "CONTRIBUTING.md",
+      "sha256": "903d5661c7f03fe990165b34fad005b3f31bd2dea878de39969aa94ce081b721"
+    },
+    {
+      "bytes": 1993,
       "path": "docs/known-limitations.md",
-      "sha256": "a75f39bbfeff2249a1874e348c3d01aa300428580c22f6d40cda5d3f7ddacb64"
+      "sha256": "aae547b08f36bb3302272b871e512342d39f1b461e1e51a0e6ae28a72311a134"
     },
     {
-      "bytes": 281,
+      "bytes": 712,
       "path": "docs/license-status.md",
-      "sha256": "a1b2e999d8246909d56bf9441d6944ee17645914071bfbe448c790a021154f31"
+      "sha256": "c561f57f23f9a65e77c7b8ca5c3d475c9b9d4ce95d7d9b8d59208315d4fcdd08"
     },
     {
-      "bytes": 1628,
+      "bytes": 4518,
+      "path": "docs/m1-m5-linux-checkpoint-20261022.md",
+      "sha256": "57d1d47b25f37200e6b73ecb369187b2a7e3a1cd91fe5b2fa0d249e7f29938d6"
+    },
+    {
+      "bytes": 3662,
+      "path": "docs/m7-tp4-layer0-host-evidence-20261027.md",
+      "sha256": "b58623fca8336f9fd369c4b77570a2f5258cdb525b4d133a066b30fae0933874"
+    },
+    {
+      "bytes": 6424,
       "path": "docs/numerical-verification.md",
-      "sha256": "aa93ead20e97621571c8df7f46322496985113fbfcba87025c3dc20f85887f63"
+      "sha256": "3740a394521a44b774a89cfbfff0d51d2b7900359877fee03cd83761c535540c"
     },
     {
-      "bytes": 962,
+      "bytes": 4677,
+      "path": "docs/phase3c-mlp-npu-evidence.md",
+      "sha256": "cada1e52de319af218fcd8489d5b717c462fd3d9f503c45302a09ddc3117c960"
+    },
+    {
+      "bytes": 4416,
       "path": "docs/roadmap.md",
-      "sha256": "1627067f09cde468fee1864fbb298d2f336d225621028632e91687dacd4ce554"
+      "sha256": "ee53786f988350fb05d68978c2a8f43298d79d3713085d18ac4f9b3f083d1c63"
     },
     {
       "bytes": 1021,
@@ -117,14 +122,29 @@
       "sha256": "bb7f728b9364d19965eeb7156d56205bf73ca80077326b4b5730966abdef0c20"
     },
     {
-      "bytes": 782,
-      "path": "pyproject.toml",
-      "sha256": "aa303cfbd6091ddf4281d20c8de1fd5f8e67b9ad8e0d690a954f6f370d5f968a"
+      "bytes": 11359,
+      "path": "LICENSE",
+      "sha256": "b1d2870f1a00e4d7f56576e5f0870cba109e041f8af66866cf5b499478e654e7"
     },
     {
-      "bytes": 4656,
+      "bytes": 837,
+      "path": "pyproject.toml",
+      "sha256": "3c7105462cb7e8831a2df41b0bf697a421d46db61ff0ffdeea38936660c39d4a"
+    },
+    {
+      "bytes": 9341,
+      "path": "README.md",
+      "sha256": "dc751e14f98d30d728e6b39635759cc4c93109dd84c36fdf0d5df1713568cba9"
+    },
+    {
+      "bytes": 4657,
       "path": "scripts/audit_publication.py",
-      "sha256": "c29e538929715ad4a78f717d6011c4d7916d0cd6e55ddea25722a51c5fe0befa"
+      "sha256": "7ea333f5ee34dfc1c4216bede4ec715448e48d8eea60d65c6c19fe5c59ae72fb"
+    },
+    {
+      "bytes": 436,
+      "path": "SECURITY.md",
+      "sha256": "0c2585564ff9d010bf9eba97d9ad3ad93f1ede66bc614b277124de271e8ffc0d"
     },
     {
       "bytes": 97,
@@ -142,9 +162,9 @@
       "sha256": "a30feac530b4b7ce2a2b2f65116dbed51630a062df65fbbac4f0f44557efefcf"
     },
     {
-      "bytes": 14207,
+      "bytes": 16576,
       "path": "src/tflite_tp/cli.py",
-      "sha256": "5815e1a67d53c5d33f7ee74d5d7b2b0a98d8a3fbad29c3ced72cd2b889f713a2"
+      "sha256": "83a86376cf693273bf01338e58166e41cebb6ecf3b5134e703d78daf1829eade"
     },
     {
       "bytes": 28737,
@@ -197,9 +217,9 @@
       "sha256": "6e9ce831c52a8899d838bf62515c99cd280754c38fd55197dbebb4d1d76697c5"
     },
     {
-      "bytes": 56028,
+      "bytes": 58739,
       "path": "src/tflite_tp/pipeline.py",
-      "sha256": "9339b5486506add9184caeda46ff673f7a6c839d22c769bf9e20af6c0be63e4f"
+      "sha256": "edd622d8653571d52032c4f27369491875fd5ca0545504c711dfa2ff7bea8b3c"
     },
     {
       "bytes": 5581,
@@ -217,9 +237,14 @@
       "sha256": "f5bb7be4700b781a9415adca8b3f66244fdb6cbd874a65bf10e6651ad13c5aac"
     },
     {
-      "bytes": 60568,
+      "bytes": 91146,
       "path": "src/tflite_tp/tflite_rewriter.py",
-      "sha256": "769cd68203e57e1bfe4eaef052f93c1b38d556ec922d94ff509d66a86f95ccec"
+      "sha256": "978f9bfcc15a198ddf040579abb66451d3d7f55868de6c504849b7cd5af59b4a"
+    },
+    {
+      "bytes": 1354,
+      "path": "tests/test_cli.py",
+      "sha256": "e6e027f3c545f52fa8a9868f1aec9439348a46a5ed73489dfb6d1d2275c9f148"
     },
     {
       "bytes": 24020,
@@ -232,9 +257,9 @@
       "sha256": "f246804498af9491a4b12a85e6ce785619bfb0ea65dde5c56f8b1599ac42858e"
     },
     {
-      "bytes": 100041,
+      "bytes": 100459,
       "path": "tests/test_pipeline.py",
-      "sha256": "73b2833be791e7c7ff8a6102e253b8b1256f711316d70fb3aa6234fdc769357f"
+      "sha256": "ce9d3e764669c102d2e44c94e1dbb298faec5f8d67c09f396b2354d46d570f3e"
     },
     {
       "bytes": 11045,
@@ -242,9 +267,9 @@
       "sha256": "57cd7d402732c5eedb58fbaf56ca881c5a912dc519c4b95f261d9b8416ba6eb1"
     },
     {
-      "bytes": 13535,
+      "bytes": 32830,
       "path": "tests/test_rewrite.py",
-      "sha256": "221692cc9756f218c5346607e7fc1485d323c5fab537fe7e75f7a3a84ea8e5a7"
+      "sha256": "e7383ca63a29a50a43f3d03c3648432f96f4f8703350fabc74156eedbedff3be"
     },
     {
       "bytes": 13944,
@@ -252,10 +277,10 @@
       "sha256": "346f16b10a2a8a487348de4cca595d137f8219435d12598fb093b04e623cf859"
     }
   ],
-  "files_checked": 50,
+  "files_checked": 55,
   "prohibited_files": [],
   "result": "PASS",
-  "scan_date": "2026-10-21",
-  "scan_scope": "git_index_staged",
+  "scan_date": "2026-10-27",
+  "scan_scope": "working_tree",
   "sensitive_content_findings": []
 }

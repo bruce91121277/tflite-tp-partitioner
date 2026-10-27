@@ -12,6 +12,22 @@
 
 ## TP4
 
+- [x] Find the M7 P128 Layer0 Host attention-context first difference and
+  verify a head-batch shape rewrite on one SHA-bound Host fixture.
+- [x] Locate the attention-context BatchMatMul by tensor contract and direct
+  ADD-consumer topology; cover arbitrary names, same-shaped CONCAT distractors,
+  equivalent templates, and fail-closed ambiguity with synthetic tests.
+- [x] Rebuild the four latest P128 attention candidates and compile them with
+  NCC 8.2.22 for `mdla5.3,edma3.6`.
+- [ ] Run the latest attention candidate hashes through Host. The current
+  runner could not start because the active RTX shell lacked an accessible
+  MTK Converter Python environment; no model invocation occurred.
+- [ ] Test the opt-in attention-context rewrite candidates on NPU; previous
+  exact evidence is fixture-scoped and tied to different hashes.
+- [ ] Resolve the observed 117 INT16 TP4 P128 Layer0 MLP NPU mismatches and
+  complete the Phase 3C FP32 Dequantize investigation.
+- [ ] Establish integrated D1 Layer0 NPU exactness, then P128/D1 Full32 NPU
+  exactness.
 - [x] Investigate the P128 Layer0 MLP discrepancy (originally 117 / 458,752
   INT16 mismatches) and identify a graph-based, fixture-independent rewrite.
 - [x] Recheck four Rank MLP public outputs against saved, SHA-matched NPU
