@@ -66,6 +66,37 @@ an NPU.
 
 The project has **not** passed a full-layer or Full32 NPU exactness gate.
 
+### M9 TP4 Layer0 NPU fixture status (2026-10-27)
+
+- The maintainer ran **112 fresh Genio 720 NPU invokes** on an idle device
+  while leaving busy devices untouched. All **48 current rank TFLite and 48
+  DLA SHA/size records** matched the saved manifests. No PTQ, TFLite export
+  or shape-fix was required.
+- **TP4 P128 Layer0:** zero mismatches in 14,155,776 recorded INT16 rank,
+  stitched and diagnostic comparisons on the tested fixture. This is an
+  aggregate comparison count with repeated values, **not** 14M distinct
+  outputs. The uninstrumented Canonical public hidden output was compared
+  with the production rank outputs.
+- **TP4 D1 Layer0:** zero mismatches in 116,736 recorded INT16 comparisons
+  on the tested fixture, including repeated rank/stitch checks. NPU output
+  stitching was done on the Host, not on four devices running in parallel.
+- Post-SwiGLU MLP, Down and public outputs were exact for nonzero fixtures.
+  **Separate Gate/Up intermediate exactness is not established**: an
+  instrumented diagnostic graph failed NCC and was not invoked.
+- The historical **117 NPU INT16 mismatches** belonged to an earlier
+  **unpadded** MLP candidate. The current M9 accepted production public
+  outputs had **zero** mismatches. A prior Phase 3C padded-component
+  result also had zero mismatches, but with different SHA/evidence scope.
+- Short per-rank Attention canary: head padding x4 increased median NPU
+  invoke wall time from 62.143 to 71.185 ms (**about 14.55% slower**);
+  full-model latency, TPS and runtime peak memory remain unmeasured.
+- **Only Layer0** has verified P128/D1 rank candidate and fixture sets in
+  the current bundle. Full32 and real concurrent four-device collectives
+  were **NOT_RUN**. Release remains **Experimental / BLOCKED**.
+
+See [M9 NPU evidence summary](docs/m9-tp4-layer0-npu-evidence-20261027.md).
+The older M8 Host checkpoint below is retained for historical scope.
+
 ### M8 TP4 Host status (2026-10-27)
 
 - TP2 and TP4 structural partitioning are implemented for supported graphs.
