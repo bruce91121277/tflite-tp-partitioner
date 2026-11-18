@@ -41,6 +41,73 @@ The Mediatek backend uses system OpenSSH commands and tooling supplied by the
 developer or device vendor; it does not install or bundle proprietary runtime
 libraries.
 
+## From a downloaded checkpoint to TP4 partitions
+
+The partitioner starts from supported **per-layer W4A16 TFLite graphs**. It does
+not download model checkpoints, run PTQ, convert PyTorch/Safetensors, or export
+layer TFLite files.
+
+### 1. Download a checkpoint you are authorized to use
+
+For a Hugging Face model, install the Hub client, authenticate locally, and
+pin a model revision so the source can be reproduced:
+
+    python -m pip install -U huggingface_hub
+    hf auth login
+    hf download meta-llama/Llama-3.1-8B-Instruct --revision REPLACE_WITH_COMMIT_SHA --local-dir ./models/llama31
+
+Use the repository and revision you are authorized to access. Gated models may
+require accepting the model license and receiving access first. Keep access
+tokens local; do not put them in scripts, logs, or this repository.
+
+### 2. Convert and quantize to per-layer TFLite
+
+Use a converter and PTQ recipe that support the model and the intended target.
+For Genio 720, obtain the compatible MediaTek Converter/SDK separately and
+follow its supported W4A16 export flow. This repository does not include that
+proprietary toolchain, calibration data, or conversion recipe.
+
+Export one Canonical TFLite graph per transformer layer for each profile you
+intend to partition. Keep P128 and D1 in separate directories, and record the
+model revision, quantization configuration, calibration lineage, converter
+version, input/output tensor contracts, and SHA-256 values. A downloaded
+checkpoint or a single full-model TFLite file is not automatically a
+per-layer source set accepted by this CLI.
+
+Example source layout:
+
+    canonical/
+      P128/  # one supported .tflite source graph per layer
+      D1/    # one supported .tflite source graph per layer
+
+### 3. Discover and build TP4 candidates
+
+Start with one layer to check graph support, then build a full profile into a
+new output directory:
+
+    tflite-tp discover --source ./canonical/D1/layer_00.tflite --expected-layers 1 --report ./audit/d1-layer0.json
+    tflite-tp build-tp4 --source ./canonical/D1/layer_00.tflite --output ./out/tp4-d1-layer0 --profile D1 --expected-layers 1
+
+For a 32-layer source directory, repeat separately for D1 and P128:
+
+    tflite-tp discover --source ./canonical/D1 --expected-layers 32 --report ./audit/d1.json
+    tflite-tp build-tp4 --source ./canonical/D1 --output ./out/tp4-d1 --profile D1 --expected-layers 32
+    tflite-tp discover --source ./canonical/P128 --expected-layers 32 --report ./audit/p128.json
+    tflite-tp build-tp4 --source ./canonical/P128 --output ./out/tp4-p128 --profile P128 --expected-layers 32
+
+Use a fresh output path for each build; existing output directories are
+rejected. Review the source and candidate SHA manifests and graph coverage
+before using the generated components.
+
+### 4. Verify the candidates on the target
+
+A successful structural build only means that a supported graph was rewritten.
+It does not establish Host Golden equality, NCC acceptance, NPU numerical
+exactness, or a distributed TP4 runtime. Run those as separate gates with
+matching Canonical inputs and fixtures. NCC, Neuron Runtime, and Genio hardware
+are supplied separately; they are not installed by this package. Sequential
+rank execution with Host stitching is not a four-device collective.
+
 ## Partition a graph
 
 Pass your own supported per-layer TFLite input. This example writes a TP4
