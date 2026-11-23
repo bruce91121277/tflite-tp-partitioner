@@ -17,6 +17,26 @@
       "sha256": "30390ebc0fb216ca473b4443eacd77392c167b8689b1c030eb8a25ee9b447bce"
     },
     {
+      "bytes": 921,
+      "path": "CONTRIBUTING.md",
+      "sha256": "903d5661c7f03fe990165b34fad005b3f31bd2dea878de39969aa94ce081b721"
+    },
+    {
+      "bytes": 11359,
+      "path": "LICENSE",
+      "sha256": "b1d2870f1a00e4d7f56576e5f0870cba109e041f8af66866cf5b499478e654e7"
+    },
+    {
+      "bytes": 7641,
+      "path": "README.md",
+      "sha256": "b242630a642acc89cbdf743d983e0e572f5cfffb34788b217b95b67f38110dd3"
+    },
+    {
+      "bytes": 436,
+      "path": "SECURITY.md",
+      "sha256": "0c2585564ff9d010bf9eba97d9ad3ad93f1ede66bc614b277124de271e8ffc0d"
+    },
+    {
       "bytes": 1124,
       "path": "backends/mediatek/README.md",
       "sha256": "c1cdfe6b1fccb919775f38294215fef6b1cb6d9ed0821bbfe72b7336e3916983"
@@ -77,14 +97,9 @@
       "sha256": "e8f2dce41f5a645f8f68b43976008a6c177047b9661a403a60bc8e565a963bd7"
     },
     {
-      "bytes": 921,
-      "path": "CONTRIBUTING.md",
-      "sha256": "903d5661c7f03fe990165b34fad005b3f31bd2dea878de39969aa94ce081b721"
-    },
-    {
-      "bytes": 1993,
+      "bytes": 958,
       "path": "docs/known-limitations.md",
-      "sha256": "aae547b08f36bb3302272b871e512342d39f1b461e1e51a0e6ae28a72311a134"
+      "sha256": "2614765882876bd6a9001abb14ccc47fa202d053b37e1cf3cc96f41955903475"
     },
     {
       "bytes": 712,
@@ -92,29 +107,24 @@
       "sha256": "c561f57f23f9a65e77c7b8ca5c3d475c9b9d4ce95d7d9b8d59208315d4fcdd08"
     },
     {
-      "bytes": 4518,
-      "path": "docs/m1-m5-linux-checkpoint-20261022.md",
-      "sha256": "57d1d47b25f37200e6b73ecb369187b2a7e3a1cd91fe5b2fa0d249e7f29938d6"
+      "bytes": 1751,
+      "path": "docs/maintainer-handoff.md",
+      "sha256": "46a12032fdb57e1409526862a849c82e4f00cae40a3e6eb7a0c7a4744c97c79f"
     },
     {
-      "bytes": 3662,
-      "path": "docs/m7-tp4-layer0-host-evidence-20261027.md",
-      "sha256": "b58623fca8336f9fd369c4b77570a2f5258cdb525b4d133a066b30fae0933874"
+      "bytes": 684,
+      "path": "docs/numerical-blockers.md",
+      "sha256": "14c0fd8016cc5ad14ba82909c4a14caafc1a4a8800755b337fa3f397e27c3195"
     },
     {
-      "bytes": 9193,
+      "bytes": 660,
       "path": "docs/numerical-verification.md",
-      "sha256": "3c55dfa4bcdbb02cbc0489062d3f73610edcf9ffd153e55f1d6de35ce70367ef"
+      "sha256": "1f795e2284ecd31d05a85f0d82d48540c665dcce8b2c6859b9323c4f4581c40b"
     },
     {
-      "bytes": 4677,
-      "path": "docs/phase3c-mlp-npu-evidence.md",
-      "sha256": "cada1e52de319af218fcd8489d5b717c462fd3d9f503c45302a09ddc3117c960"
-    },
-    {
-      "bytes": 4416,
+      "bytes": 686,
       "path": "docs/roadmap.md",
-      "sha256": "ee53786f988350fb05d68978c2a8f43298d79d3713085d18ac4f9b3f083d1c63"
+      "sha256": "fb3951f1b3f88baafe1dc82ca15e1a9528af9ef27563b9065dc2e61bbfd30155"
     },
     {
       "bytes": 1021,
@@ -122,29 +132,14 @@
       "sha256": "bb7f728b9364d19965eeb7156d56205bf73ca80077326b4b5730966abdef0c20"
     },
     {
-      "bytes": 11359,
-      "path": "LICENSE",
-      "sha256": "b1d2870f1a00e4d7f56576e5f0870cba109e041f8af66866cf5b499478e654e7"
-    },
-    {
       "bytes": 837,
       "path": "pyproject.toml",
       "sha256": "3c7105462cb7e8831a2df41b0bf697a421d46db61ff0ffdeea38936660c39d4a"
     },
     {
-      "bytes": 9378,
-      "path": "README.md",
-      "sha256": "bd70d5b9f3ebe5cb4a32f97cd2cea9dd5ee6e5337a3a008a4ff15abb50916fd9"
-    },
-    {
       "bytes": 4657,
       "path": "scripts/audit_publication.py",
       "sha256": "7ea333f5ee34dfc1c4216bede4ec715448e48d8eea60d65c6c19fe5c59ae72fb"
-    },
-    {
-      "bytes": 436,
-      "path": "SECURITY.md",
-      "sha256": "0c2585564ff9d010bf9eba97d9ad3ad93f1ede66bc614b277124de271e8ffc0d"
     },
     {
       "bytes": 97,
@@ -277,10 +272,10 @@
       "sha256": "346f16b10a2a8a487348de4cca595d137f8219435d12598fb093b04e623cf859"
     }
   ],
-  "files_checked": 55,
+  "files_checked": 54,
   "prohibited_files": [],
   "result": "PASS",
   "scan_date": "2026-10-27",
-  "scan_scope": "working_tree",
+  "scan_scope": "git_index_staged",
   "sensitive_content_findings": []
 }
