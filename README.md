@@ -1,19 +1,18 @@
 # TFLite Tensor Parallel Partitioner
 
-**Release status: Experimental.** This project creates TP2 and TP4 structural
+**Release status: Experimental.** This project creates TP2, TP4 and TP8 structural
 partitions from supported W4A16 TFLite graphs. Numerical release readiness has
 not been established.
-
-## Engineering handoff
-
-For maintainers, see the [engineering handoff](docs/maintainer-handoff.md).
 
 ## What is implemented
 
 - Graph discovery and validation for transformer projection graphs.
-- TP2 and TP4 component planning and graph rewriting.
+- TP2, TP4 and TP8 component planning and graph rewriting.
+- Fixed-token Prefill `P<n>` and Decode `D<n>` source profiles, including indexed layers.
+- `build-tail` vocabulary partitioning for TP2, TP4 and TP8.
+- Four-stage All-Gather by default; TP2 row-reduce is available with `--topology row-reduce`.
 - Packed INT4 weight slicing with quantization metadata rewriting.
-- An experimental TP4 P128 MLP Gate width rewrite that can generate structural
+- An opt-in experimental TP4 P128 MLP Gate width rewrite that can generate structural
   candidates for supported layers. Numerical verification remains SHA-bound
   and component-scoped; candidate generation does not mark NPU Exact.
 - An opt-in TP4 P128 Layer0 attention-context rewrite. It locates the
@@ -24,8 +23,25 @@ For maintainers, see the [engineering handoff](docs/maintainer-handoff.md).
   output stitching, and report generation.
 - Synthetic unit tests and a GitHub Actions workflow.
 
+The deliverable is partitioned TFLite. DLA compilation and board runtime are outside this repository.
 The partitioner does not include models, generated TFLite files, DLA binaries,
 vendor SDK files, Neuron Runtime libraries, or internal NPU captures.
+
+## Partition layout
+
+The default All-Gather layout contains six components per layer and four All-Gather boundaries.
+
+| Projection | TP2 / TP4 / TP8 split |
+| --- | --- |
+| Q | Output channel (column) |
+| K | Output channel (column) |
+| V | Output channel (column) |
+| O | Output channel (column) |
+| Gate | Output channel (column) |
+| Up | Output channel (column) |
+| Down | Output channel (column) |
+
+The optional TP2 row-reduce topology splits O and Down by input channel. MLP Gate padding and the experimental attention-context rewrite are opt-in and disabled by default. Q/K/V padding defaults to the selected rule for P128 and D1; other profiles require explicit opt-in.
 
 ## Install
 
@@ -45,7 +61,7 @@ The MediaTek backend uses system OpenSSH commands and tooling supplied by the
 developer or device vendor; it does not install or bundle proprietary runtime
 libraries.
 
-## From a downloaded checkpoint to TP4 partitions
+## Build partitions
 
 The partitioner starts from supported **per-layer W4A16 TFLite graphs**. It does
 not download model checkpoints, run PTQ, convert PyTorch/Safetensors, or export
@@ -53,7 +69,7 @@ layer TFLite files.
 
 Prepare authorized per-layer W4A16 TFLite source files using a suitable external conversion and quantization toolchain.
 
-### 3. Discover and build TP4 candidates
+### Discover and build candidates
 
 Start with one layer to check graph support, then build a full profile into a
 new output directory:
@@ -72,7 +88,7 @@ Use a fresh output path for each build; existing output directories are
 rejected. Review the source and candidate SHA manifests and graph coverage
 before using the generated components.
 
-### 4. Verify the candidates on the target
+### Verify the candidates
 
 A successful structural build only means that a supported graph was rewritten.
 It does not establish Host Golden equality, NCC acceptance, NPU numerical
@@ -117,5 +133,5 @@ other third-party tools are **not** relicensed by this project.
 
 ## Contributing
 
-See CONTRIBUTING.md and SECURITY.md. Do not submit model weights, TFLite models, DLA binaries,
+See [the engineering handoff](docs/maintainer-handoff.md), CONTRIBUTING.md and SECURITY.md. Do not submit model weights, TFLite models, DLA binaries,
 private captures, credentials, device addresses, or vendor SDK/runtime files.

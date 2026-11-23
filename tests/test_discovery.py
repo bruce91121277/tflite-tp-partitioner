@@ -1,29 +1,29 @@
 import sys
-import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 
-SRC_PATH = Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SRC_PATH))
 
 from tflite_tp.discovery import classify_profile, discover_models, source_layer_id  # noqa: E402
 from tflite_tp.errors import ModelValidationError, ToolError  # noqa: E402
 from tflite_tp.model import (  # noqa: E402
-    EXPECTED_WEIGHT_SHAPES,
     GraphInfo,
     ModelInfo,
     OperatorInfo,
     QuantizationInfo,
     TensorInfo,
+    profile_token_count,
     validate_graph,
 )
 from tflite_tp.tflite_reader import _vector, read_tflite  # noqa: E402
+from tflite_tp_testdata import TEST_WEIGHT_SHAPES, WorkspaceTemporaryDirectory as TemporaryDirectory  # noqa: E402
 
 
-def synthetic_model(layer_id=0, tokens=128, duplicate_q=False, group_scales=False, operator_name="FULLY_CONNECTED"):
+def synthetic_model(layer_id=0, tokens=128, duplicate_q=False, group_scales=False, operator_name="FULLY_CONNECTED",
+                    weight_shapes=None, head_geometry=None):
     role_list = ("q", "k", "v", "o", "gate", "up", "down")
+    weight_shapes = weight_shapes or TEST_WEIGHT_SHAPES
     tensors = []
     inputs = []
     outputs = []
@@ -41,7 +41,7 @@ def synthetic_model(layer_id=0, tokens=128, duplicate_q=False, group_scales=Fals
 
     for role in role_list:
         activation_index = len(tensors)
-        input_width = EXPECTED_WEIGHT_SHAPES[role][1]
+        input_width = weight_shapes[role][1]
         tensors.append(
             TensorInfo(
                 index=activation_index,
@@ -56,7 +56,7 @@ def synthetic_model(layer_id=0, tokens=128, duplicate_q=False, group_scales=Fals
         inputs.append(activation_index)
 
     for role_index, role in enumerate(role_list):
-        shape = EXPECTED_WEIGHT_SHAPES[role]
+        shape = weight_shapes[role]
         tensors.append(
             TensorInfo(
                 index=len(tensors),
@@ -76,7 +76,7 @@ def synthetic_model(layer_id=0, tokens=128, duplicate_q=False, group_scales=Fals
 
     for role_index, role in enumerate(role_list):
         output_index = len(tensors)
-        output_width = EXPECTED_WEIGHT_SHAPES[role][0]
+        output_width = weight_shapes[role][0]
         tensors.append(
             TensorInfo(
                 index=output_index,
@@ -136,6 +136,14 @@ def synthetic_model(layer_id=0, tokens=128, duplicate_q=False, group_scales=Fals
             )
         )
 
+    if head_geometry is not None:
+        kv_heads, head_dim = head_geometry
+        for name in ("past_keys_{}".format(layer_id), "past_values_{}".format(layer_id)):
+            index = len(tensors)
+            tensors.append(TensorInfo(index, name, (1, kv_heads, 1024, head_dim),
+                                      (1, kv_heads, 1024, head_dim), "INT16", 0, 0))
+            inputs.append(index)
+
     graph = GraphInfo(
         index=0,
         name="synthetic_llama_layer",
@@ -194,7 +202,7 @@ def synthetic_transformer_model(reverse_operator_storage=False):
     role_operators = {}
 
     def add_projection(role, activation, output_shape):
-        weight_shape = EXPECTED_WEIGHT_SHAPES[role]
+        weight_shape = TEST_WEIGHT_SHAPES[role]
         weight_index = tensor(
             "layers/0/{}/weight".format(role_names[role]),
             weight_shape,
@@ -451,13 +459,74 @@ class DiscoveryTests(unittest.TestCase):
     def test_profile_and_source_layer_inference(self):
         self.assertEqual(classify_profile(synthetic_model(tokens=128).graphs[0]), "P128")
         self.assertEqual(classify_profile(synthetic_model(tokens=1).graphs[0]), "D1")
+        self.assertEqual(classify_profile(synthetic_model(tokens=16).graphs[0]), "P16")
+        self.assertEqual(classify_profile(synthetic_model(tokens=16).graphs[0], phase="decode"), "D16")
+        self.assertEqual(classify_profile(synthetic_model(tokens=1).graphs[0], phase="prefill"), "P1")
+        self.assertEqual(profile_token_count("D16"), 16)
+        self.assertEqual(profile_token_count("P1"), 1)
         self.assertEqual(source_layer_id("prefill/layer_31_128t.tflite"), 31)
+        self.assertEqual(source_layer_id("model_1layer_64t1024c_31.tflite"), 31)
         self.assertEqual(
             source_layer_id(
                 "incoming/auto_fetch/hash__Meta-Llama-3.1-8B-Instruct_1layer_1t1024c_15.tflite"
             ),
             15,
         )
+        for context in (16, 128, 2048):
+            self.assertEqual(
+                source_layer_id(
+                    "incoming/model_1layer_1t{}c_15.tflite".format(context)
+                ),
+                15,
+            )
+
+    def test_small_llama_geometry_and_token_profile_are_discovered(self):
+        from tflite_tp.planning import make_partition_plan
+
+        shapes = {
+            "q": (3072, 3072), "k": (512, 3072), "v": (512, 3072), "o": (3072, 3072),
+            "gate": (8192, 3072), "up": (8192, 3072), "down": (3072, 8192),
+        }
+        report = discover_models([(
+            synthetic_model(tokens=16, weight_shapes=shapes, head_geometry=(4, 128)),
+            "layer00_16t.tflite",
+        )], expected_layers=1)
+        layer = report.sources[0].layers[0]
+
+        self.assertTrue(layer.complete)
+        self.assertEqual(layer.profile, "P16")
+        self.assertEqual((layer.query_heads, layer.kv_heads, layer.head_dim), (24, 4, 128))
+        plan = make_partition_plan(layer, 4).to_dict()
+        self.assertEqual(plan["collective_contract"]["all_gather_boundaries"][0]["gathered_channels"], 3072)
+        self.assertEqual(plan["collective_contract"]["all_gather_boundaries"][2]["gathered_channels"], 8192)
+        with self.assertRaises(ToolError) as raised:
+            make_partition_plan(layer, 8)
+        self.assertEqual(raised.exception.code, "HEADS_NOT_DIVISIBLE")
+
+    def test_decode_token_profile_is_preserved_in_discovery_and_plan(self):
+        from tflite_tp.planning import make_partition_plan
+
+        report = discover_models(
+            [(synthetic_model(tokens=16, head_geometry=(8, 128)), "layer00_16t.tflite")],
+            expected_layers=1,
+            phase="decode",
+        )
+        layer = report.sources[0].layers[0]
+        self.assertEqual(layer.profile, "D16")
+        plan = make_partition_plan(layer, 4).to_dict()
+        self.assertEqual(plan["profile"], "D16")
+        self.assertEqual(profile_token_count(plan["profile"]), 16)
+        self.assertEqual(plan["collective_contract"]["all_gather_boundaries"][0]["gathered_channels"], 4096)
+
+    def test_fixed_token_profiles_follow_source_phase(self):
+        for phase, tokens_set in (('prefill', (16, 32, 64, 128, 256)),
+                                  ('decode', (1, 4, 16, 32, 64, 128))):
+            for tokens in tokens_set:
+                with self.subTest(phase=phase, tokens=tokens):
+                    model = synthetic_model(tokens=tokens, head_geometry=(8, 128))
+                    report = discover_models([(model, 'layer00.tflite')], expected_layers=1, phase=phase)
+                    self.assertEqual(report.sources[0].layers[0].profile,
+                                     ('P' if phase == 'prefill' else 'D') + str(tokens))
 
     def test_transformer_features_and_dependencies_ignore_operator_storage_order(self):
         model = synthetic_transformer_model(reverse_operator_storage=True)
@@ -556,7 +625,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn("INT4_BUFFER_LENGTH_MISMATCH", [code for code, _ in raised.exception.issues])
 
     def test_bad_identifier_fails_before_schema_import(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             path = Path(directory) / "bad.tflite"
             path.write_bytes(b"not-a-tflite-file")
             with self.assertRaises(ToolError) as raised:
