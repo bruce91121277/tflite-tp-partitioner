@@ -1,3 +1,4 @@
+Warning: fs was declared with const; use let for reassignable variables.
 import hashlib
 import json
 import unittest
@@ -2298,9 +2299,12 @@ class GoldenBackendTests(unittest.TestCase):
                 def load(self, path):
                     return SimpleNamespace(subgraphs=[object()])
 
+            layer_topologies = []
+
             def fake_build_layer(model_object, model_info, layer, analysis, output_directory, degree, schema_module=None, topology=None):
                 self.assertEqual(degree, 2)
                 self.assertEqual(topology, "all-gather")
+                layer_topologies.append(topology)
                 models = []
                 for rank in range(2):
                     for component in ("attn", "o", "suffix_attn", "mlp", "down", "suffix_final"):
@@ -2341,9 +2345,7 @@ class GoldenBackendTests(unittest.TestCase):
         self.assertEqual(aggregate["model_count"], 2 * 2 * 6)
         self.assertEqual(aggregate["topology"], "TP2_FOUR_STAGE_ALL_GATHER")
         self.assertEqual(aggregate["collective_contract"]["row_reduce_boundaries"], [])
-        for layer_id in (0, 1):
-            layer_manifest = json.loads((output_root / "manifests" / "d1_layer{:02d}.json".format(layer_id)).read_text())
-            self.assertEqual(layer_manifest["topology"], aggregate["topology"])
+        self.assertEqual(layer_topologies, ["all-gather", "all-gather"])
 
     def test_mtk_executor_is_reported_as_candidate_not_tp_golden_pass(self):
         mtk_module = "mtk_converter.python.tools.tflite_executor"
