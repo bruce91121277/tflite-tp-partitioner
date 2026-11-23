@@ -246,7 +246,9 @@ def analyze_graph(model, graph, projection_roles, layer_id=None):
         operator = operators[op_index]
         if len(operator.outputs) != 1:
             continue
-        if len(graph.tensors[operator.outputs[0]].shape) < 1 or graph.tensors[operator.outputs[0]].shape[-1] != 4096:
+        hidden_size = projection_roles.get("o").shape[0] if projection_roles.get("o") else None
+        if (hidden_size is None or len(graph.tensors[operator.outputs[0]].shape) < 1
+                or graph.tensors[operator.outputs[0]].shape[-1] != hidden_size):
             continue
         projection_boundary_inputs = set()
         if "o" in projection_roles:

@@ -6,12 +6,12 @@ import re
 
 from .errors import ModelValidationError, ToolError
 from .model import (
-    EXPECTED_WEIGHT_SHAPES,
     PROJECTION_ROLES,
     DiscoveryReport,
     LayerDiscovery,
     ProjectionMatch,
     SourceDiscovery,
+    profile_token_count,
     validate_graph,
 )
 from .analysis import analyze_graph
@@ -30,7 +30,7 @@ ROLE_ALIASES = {
 
 _SEMANTIC_LAYER = re.compile(r"(?:^|/)(?:layers?/|blocks?/|layer|block)(\d+)(?:/|$)", re.IGNORECASE)
 _SOURCE_LAYER = re.compile(r"(?:^|[^a-z0-9])layer[_-]?(\d{1,2})(?:[^0-9]|$)", re.IGNORECASE)
-_SOURCE_INDEXED_LAYER = re.compile(r"(?:^|[_-])1layer_1t1024c_(\d{1,2})(?:\.tflite)?$", re.IGNORECASE)
+_SOURCE_INDEXED_LAYER = re.compile(r"(?:^|[_-])1layer_[1-9]\d*t[1-9]\d*c_(\d{1,2})(?:\.tflite)?$", re.IGNORECASE)
 
 
 def source_layer_id(source_path):
@@ -60,24 +60,68 @@ def role_from_tensor_name(tensor_name):
     return matches[0] if len(matches) == 1 else None
 
 
-def classify_profile(graph):
+def classify_profile(graph, phase=None):
+    matches, _issues = _weight_matches(graph)
+    hidden_sizes = {tensor.shape[1] for _, role, tensor, _ in matches
+                    if role == "q" and len(tensor.shape) == 2}
+    if len(hidden_sizes) != 1:
+        return "UNKNOWN"
+    hidden = next(iter(hidden_sizes))
     token_counts = set()
     for tensor_index in graph.inputs:
         if tensor_index < 0 or tensor_index >= len(graph.tensors):
             continue
         tensor = graph.tensors[tensor_index]
         for shape in (tensor.shape, tensor.shape_signature):
-            if len(shape) == 3 and shape[0] in (1, -1) and shape[-1] == 4096:
-                if shape[1] in (128, 1):
-                    token_counts.add(shape[1])
-                    break
-    if token_counts == {128}:
-        return "P128"
-    if token_counts == {1}:
-        return "D1"
-    if token_counts:
-        return "MIXED_OR_UNSUPPORTED"
-    return "UNKNOWN"
+            if len(shape) == 3 and shape[0] == 1 and shape[-1] == hidden and shape[1] > 0:
+                token_counts.add(shape[1])
+                break
+    if len(token_counts) != 1:
+        return "MIXED_OR_UNSUPPORTED" if token_counts else "UNKNOWN"
+    tokens = next(iter(token_counts))
+    prefix = "D" if phase == "decode" or (phase is None and tokens == 1) else "P"
+    return "{}{}".format(prefix, tokens)
+
+
+def _head_geometry(graph, shapes):
+    caches = [graph.tensors[index] for index in graph.inputs
+              if len(graph.tensors[index].shape) == 4 and "past" in graph.tensors[index].name.lower()
+              and ("key" in graph.tensors[index].name.lower()
+                   or "value" in graph.tensors[index].name.lower())]
+    keys = [tensor for tensor in caches if "key" in tensor.name.lower()]
+    values = [tensor for tensor in caches if "value" in tensor.name.lower()]
+    if not caches:
+        return None
+    if not keys or not values or len(keys) != len(values):
+        raise ToolError("KV_HEADS_UNRESOLVED", "cannot uniquely identify matching past key/value head geometry")
+    q_width, kv_width = shapes["q"][0], shapes["k"][0]
+    cache_geometries = []
+    for tensor in caches:
+        shape = tensor.shape
+        if len(shape) != 4 or shape[-1] <= 0:
+            raise ToolError("KV_HEADS_UNRESOLVED", "cache tensor {} has unsupported shape {}".format(tensor.name, shape))
+        candidates = {
+            (shape[axis], shape[-1])
+            for axis in (1, 2)
+            if shape[axis] > 0 and shape[axis] * shape[-1] == kv_width
+        }
+        if len(candidates) != 1:
+            raise ToolError("KV_HEADS_UNRESOLVED", "cache tensor {} has ambiguous head axes in {}".format(tensor.name, shape))
+        cache_geometries.append(candidates)
+    geometries = set.intersection(*cache_geometries)
+    if len(geometries) != 1:
+        raise ToolError("KV_HEADS_UNRESOLVED", "past key/value tensors disagree on head geometry")
+    kv_heads, head_dim = next(iter(geometries))
+    if min(kv_heads, head_dim) <= 0 or kv_width != kv_heads * head_dim or q_width % head_dim:
+        raise ToolError("HEAD_GEOMETRY_INVALID", "KV cache and projection dimensions disagree")
+    query_heads = q_width // head_dim
+    if query_heads % kv_heads:
+        raise ToolError("HEAD_GEOMETRY_INVALID", "query heads must be divisible by KV heads")
+    return query_heads, kv_heads, head_dim
+
+
+def _is_supported_profile(profile):
+    return profile_token_count(profile) is not None
 
 
 def _role_operators(graph):
@@ -130,7 +174,10 @@ def _quantization_layout(tensor):
 
 
 def _validate_projection(layer, graph, role, tensor, operator, semantic_id):
-    expected = EXPECTED_WEIGHT_SHAPES[role]
+    expected = tensor.shape
+    if len(expected) != 2 or min(expected) <= 0:
+        layer.issues.append(("PROJECTION_WEIGHT_SHAPE_INVALID", "{} weight shape is {}".format(role, expected)))
+        return
     if not _is_fully_connected_operator(operator.opcode):
         layer.issues.append(
             ("PROJECTION_OPERATOR_UNSUPPORTED", "{} uses {} at operator {}".format(role, operator.opcode, operator.index))
@@ -207,6 +254,22 @@ def _validate_projection(layer, graph, role, tensor, operator, semantic_id):
     )
 
 
+def _validate_layer_geometry(layer):
+    if set(layer.roles) != set(PROJECTION_ROLES):
+        return
+    shapes = {role: match.shape for role, match in layer.roles.items()}
+    q_width, hidden = shapes["q"]
+    kv_width = shapes["k"][0]
+    intermediate = shapes["gate"][0]
+    expected = {
+        "q": (q_width, hidden), "k": (kv_width, hidden), "v": (kv_width, hidden),
+        "o": (hidden, q_width), "gate": (intermediate, hidden),
+        "up": (intermediate, hidden), "down": (hidden, intermediate),
+    }
+    if shapes != expected:
+        layer.issues.append(("PROJECTION_GEOMETRY_INVALID", "projection shapes do not form a consistent Llama block"))
+
+
 def _discover_graph_layers(model, graph, source_name, profile):
     issues = []
     layers = []
@@ -255,6 +318,7 @@ def _discover_graph_layers(model, graph, source_name, profile):
         for code, message in issues:
             layer.issues.append((code, message))
         role_groups = grouped[layer_id]
+        layer_shapes = {}
         for role in PROJECTION_ROLES:
             candidates = role_groups.get(role, [])
             if not candidates:
@@ -265,7 +329,16 @@ def _discover_graph_layers(model, graph, source_name, profile):
                 layer.issues.append(("PROJECTION_ROLE_AMBIGUOUS", "layer {} has {} candidates {}".format(layer_id, role, indexes)))
                 continue
             tensor, operator, semantic_id = candidates[0]
+            layer_shapes[role] = tensor.shape
             _validate_projection(layer, graph, role, tensor, operator, semantic_id)
+        _validate_layer_geometry(layer)
+        if set(layer_shapes) == set(PROJECTION_ROLES):
+            try:
+                geometry = _head_geometry(graph, layer_shapes)
+                if geometry is not None:
+                    layer.query_heads, layer.kv_heads, layer.head_dim = geometry
+            except ToolError as exc:
+                layer.issues.append((exc.code, exc.message))
         analysis = analyze_graph(model, graph, layer.roles, layer_id=layer_id)
         layer.graph_features = analysis.features
         analyses.append(analysis)
@@ -274,8 +347,10 @@ def _discover_graph_layers(model, graph, source_name, profile):
     return layers, issues, analyses
 
 
-def discover_models(entries, expected_layers=32):
+def discover_models(entries, expected_layers=32, phase=None):
     """Analyze already parsed models; useful for offline synthetic graph tests."""
+    if phase not in (None, "prefill", "decode"):
+        raise ToolError("PROFILE_PHASE_INVALID", "phase must be prefill or decode")
     report = DiscoveryReport(expected_layers=expected_layers)
     for model, source_name in entries:
         source = SourceDiscovery(
@@ -287,8 +362,8 @@ def discover_models(entries, expected_layers=32):
             model_info=model,
         )
         for graph in model.graphs:
-            profile = classify_profile(graph)
-            if profile not in ("P128", "D1"):
+            profile = classify_profile(graph, phase=phase)
+            if not _is_supported_profile(profile):
                 source.issues.append(("PROFILE_UNRESOLVED", "graph {} profile is {}".format(graph.index, profile)))
             if profile not in source.profiles:
                 source.profiles.append(profile)
@@ -304,10 +379,10 @@ def discover_models(entries, expected_layers=32):
     by_profile = defaultdict(list)
     for source in report.sources:
         for layer in source.layers:
-            if layer.profile in ("P128", "D1"):
+            if _is_supported_profile(layer.profile):
                 by_profile[layer.profile].append(layer.layer_id)
 
-    profiles = sorted(set(by_profile) | {profile for source in report.sources for profile in source.profiles if profile in ("P128", "D1")})
+    profiles = sorted(set(by_profile) | {profile for source in report.sources for profile in source.profiles if _is_supported_profile(profile)})
     for profile in profiles:
         layer_ids = by_profile.get(profile, [])
         duplicates = sorted(index for index in set(layer_ids) if layer_ids.count(index) > 1)
@@ -336,7 +411,7 @@ def discover_models(entries, expected_layers=32):
     return report
 
 
-def discover_path(source_path, expected_layers=32, schema_module=None):
+def discover_path(source_path, expected_layers=32, schema_module=None, phase=None):
     """Scan a TFLite file or directory and produce a source/layer audit."""
     source_path = Path(source_path)
     if not source_path.exists():
@@ -361,7 +436,7 @@ def discover_path(source_path, expected_layers=32, schema_module=None):
             entries.append((model, relative))
         except ToolError as exc:
             failed_sources.append((path.name, exc.code, exc.message))
-    report = discover_models(entries, expected_layers=expected_layers)
+    report = discover_models(entries, expected_layers=expected_layers, phase=phase)
     for source_name, code, message in failed_sources:
         report.issues.append((code, "{}: {}".format(source_name, message)))
         report.sources.append(

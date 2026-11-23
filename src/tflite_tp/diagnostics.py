@@ -445,9 +445,17 @@ class AutoRepairEngine:
         while len(attempts) < self.max_repairs:
             mismatch_rows = current.get("mismatches") or []
             if not mismatch_rows:
+                failure = current.get("first_failure")
+                if not failure:
+                    failure = (
+                        "GOLDEN_REPORT_NOT_FULLY_VERIFIED"
+                        if current.get("numerical_status") == "NUMERICAL_PASS"
+                        and current.get("mismatch_count") == 0
+                        else "MISMATCH_DETAILS_MISSING"
+                    )
                 return {
                     "status": "REPAIR_BLOCKED",
-                    "failure": current.get("first_failure", "MISMATCH_DETAILS_MISSING"),
+                    "failure": failure,
                     "attempts": attempts,
                     "final_report": current,
                 }

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 from .errors import ToolError
-from .model import EXPECTED_WEIGHT_SHAPES, PROJECTION_ROLES, LayerDiscovery
+from .model import PROJECTION_ROLES, LayerDiscovery, profile_token_count
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class PartitionPlan:
     source_name: str
     source_sha256: str
     collective_contract: Dict[str, object]
+    head_geometry: Dict[str, object]
     projections: List[Dict[str, object]]
 
     def to_dict(self):
@@ -27,6 +28,7 @@ class PartitionPlan:
             "profile": self.profile,
             "source": self.source_name,
             "source_sha256": self.source_sha256,
+            "head_geometry": self.head_geometry,
             "collective_contract": self.collective_contract,
             "projections": self.projections,
             "structural_status": "PLAN_ONLY",
@@ -35,15 +37,16 @@ class PartitionPlan:
         }
 
 
-def _collective_contract(degree, tokens):
-    if degree == 2:
+def _collective_contract(degree, tokens, hidden_size, intermediate_size, q_width, topology=None):
+    topology = resolve_topology(degree, topology)
+    if topology == "row-reduce":
         return {
             "architecture": "ROW_REDUCE",
             "rank_order": [0, 1],
             "all_gather_boundaries": [],
             "row_reduce_boundaries": [
-                {"name": "O", "operation": "ALL_REDUCE_SUM", "shape": [1, tokens, 4096]},
-                {"name": "Down", "operation": "ALL_REDUCE_SUM", "shape": [1, tokens, 4096]},
+                {"name": "O", "operation": "ALL_REDUCE_SUM", "shape": [1, tokens, hidden_size]},
+                {"name": "Down", "operation": "ALL_REDUCE_SUM", "shape": [1, tokens, hidden_size]},
             ],
             "residual_policy": "ADD_ONCE_AFTER_EACH_REDUCE",
             "kv_cache_policy": "RANK_LOCAL",
@@ -51,12 +54,12 @@ def _collective_contract(degree, tokens):
         }
     return {
         "architecture": "FOUR_STAGE_ALL_GATHER",
-        "rank_order": [0, 1, 2, 3],
+        "rank_order": list(range(degree)),
         "all_gather_boundaries": [
-            {"stage": "AG0", "tensor": "attention_context", "local_channels": 1024, "gathered_channels": 4096},
-            {"stage": "AG1", "tensor": "o_projection", "local_channels": 1024, "gathered_channels": 4096},
-            {"stage": "AG2", "tensor": "swiglu", "local_channels": 3584, "gathered_channels": 14336},
-            {"stage": "AG3", "tensor": "down_projection", "local_channels": 1024, "gathered_channels": 4096},
+            {"stage": "AG0", "tensor": "attention_context", "local_channels": q_width // degree, "gathered_channels": q_width},
+            {"stage": "AG1", "tensor": "o_projection", "local_channels": hidden_size // degree, "gathered_channels": hidden_size},
+            {"stage": "AG2", "tensor": "swiglu", "local_channels": intermediate_size // degree, "gathered_channels": intermediate_size},
+            {"stage": "AG3", "tensor": "down_projection", "local_channels": hidden_size // degree, "gathered_channels": hidden_size},
         ],
         "row_reduce_boundaries": [],
         "residual_policy": "ADD_ONCE_AT_DOCUMENTED_BOUNDARIES",
@@ -65,31 +68,129 @@ def _collective_contract(degree, tokens):
     }
 
 
-def make_partition_plan(layer, degree):
+def resolve_topology(degree, topology=None):
+    if degree not in (2, 4, 8):
+        raise ToolError("TP_DEGREE_UNSUPPORTED", "supported tensor-parallel degrees are 2, 4 and 8")
+    # All degrees default to the four-stage All-Gather contract; TP2 row-reduce is an explicit legacy option.
+    topology = topology or "all-gather"
+    if topology not in ("row-reduce", "all-gather") or (topology == "row-reduce" and degree != 2):
+        raise ToolError("TOPOLOGY_UNSUPPORTED", "unsupported topology {} for TP{}".format(topology, degree))
+    return topology
+
+
+# One artifact version for every build: six components per rank and layer, with the
+# byte-identical suffix_attn/suffix_final compiled once per layer and shared by all ranks.
+ARTIFACT_VERSION = "genio-tp-allgather-v1"
+ARTIFACT_LAYOUT = "shared-suffix"
+DEPRECATED_LAYOUT_ALIASES = ("legacy18", "rank-local24")
+
+
+def resolve_artifact_layout(layout=None):
+    """Return (layout, deprecated_alias_or_None); every accepted name maps to the single layout."""
+    if layout in (None, ARTIFACT_LAYOUT):
+        return ARTIFACT_LAYOUT, None
+    if layout in DEPRECATED_LAYOUT_ALIASES:
+        return ARTIFACT_LAYOUT, layout
+    raise ToolError("ARTIFACT_LAYOUT_UNSUPPORTED", "{} (supported: {})".format(layout, ARTIFACT_LAYOUT))
+
+
+# Q/K/V 2x output-width padding has Host/NPU evidence only for these fixed-token profiles.
+VERIFIED_QKV_PADDING_PROFILES = ("P128", "D1")
+QKV_PADDING_DEGREES = (4, 8)
+
+
+def resolve_qkv_padding(degree, profile, requested=None, structurally_supported=True):
+    """Single policy for the TP4/TP8 Q/K/V width padding, shared by every build entry point.
+
+    requested=None pads only verified profiles; 2 is an explicit opt-in (any profile whose
+    Q/K/V FCs support the rewrite); 0 disables padding. Returns (multiplier or None, decision).
+    """
+    if requested not in (None, 0, 2):
+        raise ToolError(
+            "FC_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
+            "only 2 or 0 (explicitly disabled for diagnostics) is accepted",
+        )
+    verified = profile in VERIFIED_QKV_PADDING_PROFILES
+    multiplier = None
+    if degree not in QKV_PADDING_DEGREES:
+        decision = "DEGREE_NOT_PADDED"
+    elif requested == 0:
+        decision = "EXPLICIT_DISABLED"
+    elif requested == 2:
+        if not structurally_supported:
+            raise ToolError(
+                "FC_WIDTH_PADDING_STRUCTURE_UNSUPPORTED",
+                "TP{} {} Q/K/V projections do not support width padding".format(degree, profile),
+            )
+        multiplier, decision = 2, "EXPLICIT_OPT_IN"
+    elif not verified:
+        decision = "AUTO_UNVERIFIED_PROFILE"
+    elif not structurally_supported:
+        decision = "AUTO_STRUCTURE_UNSUPPORTED"
+    else:
+        multiplier, decision = 2, "AUTO_VERIFIED_PROFILE"
+    return multiplier, {
+        "degree": degree,
+        "profile": profile,
+        "requested": requested,
+        "multiplier": multiplier,
+        "decision": decision,
+        "verified_profile": verified,
+        "verified_profiles": list(VERIFIED_QKV_PADDING_PROFILES),
+    }
+
+
+def qkv_padding_status(degree, profile, multiplier):
+    """Manifest status naming the profile the padding was actually applied to."""
+    if multiplier is None:
+        return "DISABLED"
+    prefix = "APPLIED" if degree == 4 else "CANDIDATE_APPLIED"
+    suffix = "" if profile in VERIFIED_QKV_PADDING_PROFILES else "_UNVERIFIED_PROFILE"
+    return "{}_TO_TP{}_{}_QKV{}".format(prefix, degree, profile, suffix)
+
+
+def make_partition_plan(layer, degree, topology=None):
     """Build a tensor-ID-free partition plan from automatically discovered roles."""
-    if degree not in (2, 4):
-        raise ToolError("TP_DEGREE_UNSUPPORTED", "supported tensor-parallel degrees are 2 and 4")
+    topology = resolve_topology(degree, topology)
     if not layer.complete:
         raise ToolError("LAYER_DISCOVERY_INCOMPLETE", "layer {} has unresolved or incomplete projection roles".format(layer.layer_id))
     if set(layer.roles) != set(PROJECTION_ROLES):
         raise ToolError("PROJECTION_ROLE_SET_INVALID", "layer {} does not contain exactly seven projections".format(layer.layer_id))
 
-    tokens = 128 if layer.profile == "P128" else 1 if layer.profile == "D1" else 0
-    if not tokens:
-        raise ToolError("PROFILE_UNSUPPORTED", "profile {} is not P128 or D1".format(layer.profile))
+    tokens = profile_token_count(layer.profile)
+    if tokens is None:
+        raise ToolError("PROFILE_UNSUPPORTED", "profile {} has no fixed token extent".format(layer.profile))
+
+    shapes = {role: tuple(layer.roles[role].shape) for role in PROJECTION_ROLES}
+    if any(len(shape) != 2 or min(shape) <= 0 for shape in shapes.values()):
+        raise ToolError("PROJECTION_SHAPE_INVALID", "all projection weights must be positive rank-two matrices")
+    q_width, hidden_size = shapes["q"]
+    kv_width = shapes["k"][0]
+    intermediate_size = shapes["gate"][0]
+    expected_shapes = {
+        "q": (q_width, hidden_size), "k": (kv_width, hidden_size), "v": (kv_width, hidden_size),
+        "o": (hidden_size, q_width), "gate": (intermediate_size, hidden_size),
+        "up": (intermediate_size, hidden_size), "down": (hidden_size, intermediate_size),
+    }
+    if shapes != expected_shapes:
+        raise ToolError("PROJECTION_GEOMETRY_INVALID", "projection shapes do not form a consistent Llama block")
+    if not all(value is not None and value > 0 for value in (layer.query_heads, layer.kv_heads, layer.head_dim)):
+        raise ToolError("HEAD_GEOMETRY_UNRESOLVED", "query heads, KV heads and head dimension must resolve before partitioning")
+    if (q_width != layer.query_heads * layer.head_dim
+            or kv_width != layer.kv_heads * layer.head_dim
+            or layer.query_heads % layer.kv_heads):
+        raise ToolError("HEAD_GEOMETRY_INVALID", "projection widths do not match the discovered query/KV head geometry")
+    if layer.query_heads % degree or layer.kv_heads % degree:
+        raise ToolError("HEADS_NOT_DIVISIBLE", "{} query heads and {} KV heads cannot be evenly split over TP{}".format(
+            layer.query_heads, layer.kv_heads, degree))
 
     projections = []
     for role in PROJECTION_ROLES:
         match = layer.roles[role]
-        expected_shape = EXPECTED_WEIGHT_SHAPES[role]
-        if match.shape != expected_shape:
-            raise ToolError(
-                "PROJECTION_SHAPE_UNSUPPORTED",
-                "{} has shape {}; expected {}".format(role, match.shape, expected_shape),
-            )
+        expected_shape = shapes[role]
         if match.dtype != "INT4":
             raise ToolError("PROJECTION_DTYPE_UNSUPPORTED", "{} is {}; expected INT4".format(role, match.dtype))
-        if degree == 2 and role in ("o", "down"):
+        if topology == "row-reduce" and role in ("o", "down"):
             axis = 1
             partition_kind = "INPUT_CHANNEL_ROW_REDUCE"
             bias_policy = "RANK0_ONLY"
@@ -126,14 +227,16 @@ def make_partition_plan(layer, degree):
             }
         )
 
-    topology = "TP2_ROW_REDUCE" if degree == 2 else "TP4_FOUR_STAGE_ALL_GATHER"
+    topology_name = "TP2_ROW_REDUCE" if topology == "row-reduce" else "TP{}_FOUR_STAGE_ALL_GATHER".format(degree)
     return PartitionPlan(
-        topology=topology,
+        topology=topology_name,
         degree=degree,
         layer=layer.layer_id,
         profile=layer.profile,
         source_name=layer.source_name,
         source_sha256=layer.source_sha256,
-        collective_contract=_collective_contract(degree, tokens),
+        collective_contract=_collective_contract(degree, tokens, hidden_size, intermediate_size, q_width, topology),
+        head_geometry={"query_heads": layer.query_heads, "kv_heads": layer.kv_heads,
+                       "head_dim": layer.head_dim},
         projections=projections,
     )

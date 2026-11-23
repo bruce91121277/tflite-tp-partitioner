@@ -1,4 +1,4 @@
-"""End-to-end source scan, TP2/TP4 candidate build, and fail-closed release flow."""
+"""End-to-end source scan, TP2/TP4/TP8 candidate build, and fail-closed release flow."""
 
 import hashlib
 import json
@@ -14,6 +14,7 @@ from .diagnostics import (
 from .errors import ToolError
 from .golden import (
     MTKConverterTFLiteRunner,
+    _TP4_LAYER_COMPONENTS,
     run_tp2_row_reduce_profile_golden,
     run_tp4_profile_golden,
 )
@@ -21,21 +22,16 @@ from .planning import make_partition_plan
 from .release import (
     _validate_golden_report,
     evaluate_release,
-    golden_fixture_identity_failure,
     publish_release,
 )
-from .tflite_rewriter import build_tp2_directory, build_tp4_directory
-
-
-_PROFILE_INPUTS = (
-    ("P128", "prefill", "prefill128"),
-    ("D1", "decode", "decode1"),
-)
+from .tflite_rewriter import build_tp2_directory, build_tp4_directory, build_tp8_directory
 
 
 def _scoped_mlp_gate_padding(degree, profile, requested_multiplier):
-    """Allow structural Gate candidates for TP4 P128; keep numerical claims SHA-scoped."""
-    if requested_multiplier is None or degree != 4 or profile != "P128":
+    """Scope verified TP4 P128 and experimental TP8 P128/D1 MLP candidates."""
+    if requested_multiplier is None:
+        return None
+    if (degree, profile) not in ((4, "P128"), (8, "P128"), (8, "D1")):
         return None
     return requested_multiplier
 
@@ -126,46 +122,63 @@ def _finalize_tp4_golden(root, manifest, report):
     numerical_status = report.get("numerical_status")
     if not isinstance(mismatch_count, int) or numerical_status not in ("NUMERICAL_PASS", "NUMERICAL_FAIL"):
         raise ToolError("GOLDEN_REPORT_INVALID", "TP4 profile report has invalid status/count")
-    fixture_failure = golden_fixture_identity_failure(
-        report,
-        manifest.get("expected_layers", 0),
-    )
-
     manifest["golden_report_path"] = report_path.name
     manifest["golden_report_sha256"] = report_sha
     manifest["numerical_status"] = numerical_status
     manifest["mismatch_count"] = mismatch_count
     manifest["npu_verification_status"] = "NPU_UNVERIFIED"
+    golden_failure = None
+    if numerical_status == "NUMERICAL_PASS" and mismatch_count == 0:
+        golden_failure = _validate_golden_report(
+            root,
+            manifest,
+            _source_hashes_from_manifest(manifest, manifest.get("profile")),
+            len(manifest.get("rank_order") or report.get("golden_coverage", {}).get("ranks", [])),
+            _TP4_LAYER_COMPONENTS,
+        )
+        if golden_failure:
+            report["numerical_status"] = "NUMERICAL_INCOMPLETE"
+            report["first_failure"] = golden_failure
+            _write_json(report_path, report)
+            report_sha = _file_sha256(report_path)
+            manifest["golden_report_sha256"] = report_sha
+            numerical_status = "NUMERICAL_INCOMPLETE"
+            manifest["numerical_status"] = numerical_status
+    complete_exact = (
+        numerical_status == "NUMERICAL_PASS"
+        and mismatch_count == 0
+        and golden_failure is None
+    )
     manifest["numerical_gate"] = {
         "code": (
-            fixture_failure
-            if numerical_status == "NUMERICAL_PASS" and mismatch_count == 0 and fixture_failure
+            golden_failure
+            if mismatch_count == 0 and golden_failure
             else None
-            if numerical_status == "NUMERICAL_PASS"
+            if complete_exact
             else "GOLDEN_MISMATCH_COUNT_NONZERO"
         ),
         "reason": (
-            "Golden fixture identity or layer coverage is incomplete."
-            if numerical_status == "NUMERICAL_PASS" and mismatch_count == 0 and fixture_failure
+            "The TP4 Golden report does not satisfy the complete profile contract: {}.".format(golden_failure)
+            if mismatch_count == 0 and golden_failure
             else "All required per-rank TP4 boundaries were compared."
-            if numerical_status == "NUMERICAL_PASS"
+            if complete_exact
             else "Golden mismatches are recorded in GOLDEN_REPORT.json."
         ),
         "backend": report.get("backend"),
         "verification_scope": "HOST_CANONICAL_GOLDEN",
     }
-    if numerical_status == "NUMERICAL_PASS" and mismatch_count == 0 and not fixture_failure:
+    if complete_exact:
         manifest["host_verification_status"] = "HOST_VERIFIED"
         manifest["auto_repair_report"] = {"status": "NO_REPAIR_NEEDED", "attempts": [], "first_failure": None}
-        manifest["release_status"] = "RELEASE_PASS"
+        manifest["release_status"] = "NUMERICAL_PASS_RELEASE_PENDING"
         manifest["release_verification_scope"] = "HOST_CANONICAL_GOLDEN"
-    elif numerical_status == "NUMERICAL_PASS" and mismatch_count == 0:
+    elif mismatch_count == 0 and golden_failure:
         manifest["host_verification_status"] = "HOST_VERIFICATION_INCOMPLETE"
         manifest["auto_repair_report"] = {
             "status": "BLOCKED",
             "attempts": [],
-            "first_failure": fixture_failure,
-            "reason": "A numerical pass without complete fixture SHA evidence is not eligible for release.",
+            "first_failure": golden_failure or "GOLDEN_REPORT_NOT_FULLY_VERIFIED",
+            "reason": "A zero-mismatch probe without complete source, fixture, layer, rank, component, and boundary evidence is not eligible for release.",
         }
         manifest["release_status"] = "NOT_ELIGIBLE"
     else:
@@ -381,7 +394,46 @@ def _auto_repair_tp4_candidate(
     except (OSError, ValueError) as exc:
         raise ToolError("AUTO_REPAIR_GOLDEN_REPORT_MISSING", str(exc))
 
-    engine = AutoRepairEngine(max_repairs=max_repairs)
+    def full_tp4_profile_is_exact(report):
+        if report.get("numerical_status") != "NUMERICAL_PASS" or report.get("mismatch_count") != 0:
+            return False
+        report_root = Path(report.get("candidate_root", candidate_root))
+        try:
+            verified_manifest = _verify_resume_candidate(
+                report_root,
+                source_report,
+                4,
+                profile,
+                expected_layers,
+            )
+        except ToolError:
+            return False
+        if verified_manifest.get("numerical_status") != "NUMERICAL_PASS" or verified_manifest.get("mismatch_count") != 0:
+            return False
+        reported_manifest = report.get("candidate_manifest")
+        if isinstance(reported_manifest, dict):
+            if (
+                reported_manifest.get("golden_report_sha256")
+                != verified_manifest.get("golden_report_sha256")
+                or reported_manifest.get("model_count") != verified_manifest.get("model_count")
+            ):
+                return False
+        golden_name = verified_manifest.get("golden_report_path")
+        if not golden_name:
+            return False
+        try:
+            saved_golden = json.loads((report_root / golden_name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        reported_golden = report.get("golden_report")
+        if isinstance(reported_golden, dict) and reported_golden != saved_golden:
+            return False
+        return True
+
+    engine = AutoRepairEngine(
+        max_repairs=max_repairs,
+        success_condition=full_tp4_profile_is_exact,
+    )
     repair_roots = []
 
     def rebuild_from_canonical(mismatch, expected_source_sha256, repair_rule):
@@ -407,9 +459,7 @@ def _auto_repair_tp4_candidate(
                 expected_layers=expected_layers,
                 discovery_report=source_report,
                 fc_width_padding_multiplier=fc_width_padding_multiplier,
-                mlp_gate_dequant_width_padding_multiplier=_scoped_mlp_gate_padding(
-                    4, profile, mlp_gate_dequant_width_padding_multiplier
-                ),
+                mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
             )
         except ToolError:
             return {}
@@ -678,7 +728,7 @@ def _source_hashes(report, profile):
     }
 
 
-def _verify_resume_candidate(root, expected_report, degree, profile, expected_layers):
+def _verify_resume_candidate(root, expected_report, degree, profile, expected_layers, topology=None):
     root = Path(root)
     manifest_path = root / "MANIFEST.json"
     if not manifest_path.is_file():
@@ -691,7 +741,10 @@ def _verify_resume_candidate(root, expected_report, degree, profile, expected_la
         raise ToolError("RESUME_CANDIDATE_NOT_STRUCTURAL_PASS", str(root))
     if manifest.get("profile") != profile or manifest.get("expected_layers") != expected_layers:
         raise ToolError("RESUME_PROFILE_OR_COVERAGE_MISMATCH", str(root))
-    if manifest.get("topology") != ("TP2_ROW_REDUCE" if degree == 2 else "TP4_FOUR_STAGE_ALL_GATHER"):
+    from .planning import resolve_topology
+    mode = resolve_topology(degree, topology)
+    expected_topology = "TP2_ROW_REDUCE" if mode == "row-reduce" else "TP{}_FOUR_STAGE_ALL_GATHER".format(degree)
+    if manifest.get("topology") != expected_topology:
         raise ToolError("RESUME_TOPOLOGY_MISMATCH", str(root))
     expected_sources = _source_hashes(expected_report, profile)
     actual_sources = _source_hashes_from_manifest(manifest, profile)
@@ -752,7 +805,7 @@ def _verify_resume_candidate(root, expected_report, degree, profile, expected_la
             if partition.get("reconstruction_equal") is not True:
                 raise ToolError("RESUME_WEIGHT_RECONSTRUCTION_FAILED", "{}:{}".format(relative, role))
     if manifest.get("numerical_status") == "NUMERICAL_PASS":
-        if degree != 4:
+        if mode != "all-gather":
             raise ToolError("RESUME_GOLDEN_VERIFICATION_UNSUPPORTED", str(degree))
         golden_name = manifest.get("golden_report_path")
         golden_sha = manifest.get("golden_report_sha256")
@@ -798,11 +851,24 @@ def run_pipeline(
     golden_runner=None,
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
+    prefill_tokens=128,
+    decode_tokens=1,
+    topology=None,
 ):
     """Run discovery, build candidate TFLites, and evaluate release eligibility."""
-    if tensor_parallel not in (2, 4, "all"):
-        raise ToolError("TP_DEGREE_UNSUPPORTED", "--tp must be 2, 4, or all")
-    if fc_width_padding_multiplier is None and tensor_parallel in (4, "all"):
+    if tensor_parallel not in (2, 4, 8, "all"):
+        raise ToolError("TP_DEGREE_UNSUPPORTED", "--tp must be 2, 4, 8, or all")
+    from .planning import resolve_topology
+    if topology == "row-reduce" and tensor_parallel != 2:
+        raise ToolError("TOPOLOGY_UNSUPPORTED", "row-reduce requires TP2")
+    if any(not isinstance(count, int) or isinstance(count, bool) or count <= 0
+           for count in (prefill_tokens, decode_tokens)):
+        raise ToolError("TOKEN_COUNT_INVALID", "Prefill and Decode token counts must be positive integers")
+    profile_inputs = (
+        ("P{}".format(prefill_tokens), "prefill", "prefill{}".format(prefill_tokens)),
+        ("D{}".format(decode_tokens), "decode", "decode{}".format(decode_tokens)),
+    )
+    if fc_width_padding_multiplier is None and tensor_parallel in (4, 8, "all"):
         fc_width_padding_multiplier = 2
     if fc_width_padding_multiplier is not None:
         multiplier = int(fc_width_padding_multiplier)
@@ -813,8 +879,8 @@ def run_pipeline(
                 "FC_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
                 "only multiplier 2 passed Host regression; use 0 to disable padding for diagnostics",
             )
-        elif tensor_parallel not in (4, "all"):
-            raise ToolError("FC_WIDTH_PADDING_PROFILE_UNSUPPORTED", "FC width padding requires a TP4 candidate")
+        elif tensor_parallel not in (4, 8, "all"):
+            raise ToolError("FC_WIDTH_PADDING_PROFILE_UNSUPPORTED", "FC width padding requires a TP4 or TP8 candidate")
         else:
             fc_width_padding_multiplier = multiplier
     if mlp_gate_dequant_width_padding_multiplier is not None:
@@ -824,10 +890,18 @@ def run_pipeline(
         elif multiplier != 2:
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-                "only multiplier 2 has saved TP4 P128 MLP component NPU evidence; use 0 to disable",
+                "only multiplier 2 has P128 TP4 MLP component NPU evidence; use 0 to disable",
             )
-        elif tensor_parallel not in (4, "all"):
-            raise ToolError("MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED", "MLP Gate rewrite requires TP4")
+        elif tensor_parallel not in (4, 8, "all"):
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_PROFILE_UNSUPPORTED",
+                "MLP Gate Dequant width padding requires a TP4 or TP8 candidate",
+            )
+        elif tensor_parallel == 4 and prefill_tokens != 128:
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_PROFILE_UNSUPPORTED",
+                "TP4 MLP Gate Dequant width padding is supported only for P128",
+            )
         else:
             mlp_gate_dequant_width_padding_multiplier = multiplier
     if quant.lower() != "w4a16":
@@ -835,7 +909,7 @@ def run_pipeline(
     if max_repairs < 0:
         raise ToolError("MAX_REPAIRS_INVALID", "--max-repairs cannot be negative")
     output_root = Path(output_directory)
-    marker_path = output_root / "TFLITE_TP_RUN.json"
+    marker_path = output_root / "GENIO_TP_SPLIT_RUN.json"
     if output_root.exists() and not resume:
         raise ToolError("OUTPUT_DIRECTORY_EXISTS", "use a new output directory or --resume after SHA validation")
     if output_root.exists() and resume and not marker_path.is_file():
@@ -844,13 +918,15 @@ def run_pipeline(
     if not marker_path.exists():
         _write_json(marker_path, {"schema": 1, "tool": "tflite_tp", "resume_requires_sha_validation": True})
 
-    requested_degrees = (2, 4) if tensor_parallel == "all" else (int(tensor_parallel),)
+    requested_degrees = (2, 4, 8) if tensor_parallel == "all" else (int(tensor_parallel),)
     input_paths = {"prefill": str(prefill), "decode": str(decode)}
     source_reports = {}
     discovery_failures = []
-    for profile, input_key, _profile_dir in _PROFILE_INPUTS:
+    for profile, input_key, _profile_dir in profile_inputs:
         try:
-            report = discover_path(input_paths[input_key], expected_layers=expected_layers)
+            report = discover_path(
+                input_paths[input_key], expected_layers=expected_layers, phase=input_key
+            )
             source_reports[profile] = report
             if not report.structural_pass:
                 codes = sorted({code for code, _message in report.issues})
@@ -873,12 +949,14 @@ def run_pipeline(
     run_manifest = {
         "schema": 1,
         "project": "GENIO720_FULLY_AUTOMATED_TFLITE_PARTITIONER",
-        "model": "LLAMA31_8B",
+        "model": "LLAMA",
         "quant": quant.lower(),
         "expected_layers": expected_layers,
         "tensor_parallel": list(requested_degrees),
         "input_paths": input_paths,
         "options": {
+            "prefill_tokens": prefill_tokens,
+            "decode_tokens": decode_tokens,
             "strict_bitexact": bool(strict_bitexact),
             "auto_repair": bool(auto_repair),
             "max_repairs": max_repairs,
@@ -910,12 +988,12 @@ def run_pipeline(
 
     plans = []
     if not discovery_failures:
-        for profile, _input_key, _profile_dir in _PROFILE_INPUTS:
+        for profile, _input_key, _profile_dir in profile_inputs:
             report = source_reports[profile]
             for source in report.sources:
                 for layer in source.layers:
                     for degree in requested_degrees:
-                        plans.append(make_partition_plan(layer, degree=degree).to_dict())
+                        plans.append(make_partition_plan(layer, degree=degree, topology=topology).to_dict())
     run_manifest["partition_plans"] = plans
 
     if dry_run:
@@ -949,7 +1027,7 @@ def run_pipeline(
         _write_json(output_root / "RUN_MANIFEST.json", run_manifest)
         return run_manifest
 
-    builders = {2: build_tp2_directory, 4: build_tp4_directory}
+    builders = {2: build_tp2_directory, 4: build_tp4_directory, 8: build_tp8_directory}
     profile_runner = golden_runner
     profile_runner_error = None
     if profile_runner is None:
@@ -960,8 +1038,8 @@ def run_pipeline(
     candidate_sets = []
     build_failures = []
     for degree in requested_degrees:
-        for profile, _input_key, profile_dir in _PROFILE_INPUTS:
-            source_path = input_paths["prefill" if profile == "P128" else "decode"]
+        for profile, input_key, profile_dir in profile_inputs:
+            source_path = input_paths[input_key]
             label = "tp{}_{}".format(degree, profile_dir)
             candidate_root = work_root / "tp{}".format(degree) / profile_dir
             candidate_root.parent.mkdir(parents=True, exist_ok=True)
@@ -976,10 +1054,11 @@ def run_pipeline(
                         degree,
                         profile,
                         expected_layers,
+                        topology=topology,
                     )
                     expected_padding = (
                         fc_width_padding_multiplier
-                        if degree == 4 and profile in ("P128", "D1")
+                        if degree in (4, 8) and profile in ("P128", "D1")
                         else None
                     )
                     observed_padding = manifest.get("fc_width_padding_rule", {}).get("multiplier")
@@ -991,13 +1070,17 @@ def run_pipeline(
                                 expected_padding,
                             ),
                         )
-                    expected_mlp_padding = _scoped_mlp_gate_padding(
-                        degree, profile, mlp_gate_dequant_width_padding_multiplier
+                    observed_mlp_padding = manifest.get(
+                        "mlp_gate_dequant_width_padding_rule", {}
+                    ).get("multiplier")
+                    expected_mlp_padding = (
+                        _scoped_mlp_gate_padding(
+                            degree, profile, mlp_gate_dequant_width_padding_multiplier
+                        )
                     )
-                    observed_mlp_padding = manifest.get("mlp_gate_dequant_width_padding_rule", {}).get("multiplier")
                     if observed_mlp_padding != expected_mlp_padding:
                         raise ToolError(
-                            "RESUME_MLP_GATE_WIDTH_PADDING_MISMATCH",
+                            "RESUME_MLP_GATE_DEQUANT_WIDTH_PADDING_MISMATCH",
                             "candidate uses multiplier {} but current request requires {}".format(
                                 observed_mlp_padding,
                                 expected_mlp_padding,
@@ -1010,7 +1093,7 @@ def run_pipeline(
                         "expected_layers": expected_layers,
                         "discovery_report": source_reports[profile],
                     }
-                    if degree == 4:
+                    if degree in (4, 8):
                         build_options["fc_width_padding_multiplier"] = (
                             fc_width_padding_multiplier if profile in ("P128", "D1") else None
                         )
@@ -1019,12 +1102,14 @@ def run_pipeline(
                                 degree, profile, mlp_gate_dequant_width_padding_multiplier
                             )
                         )
+                    if degree == 2:
+                        build_options["topology"] = resolve_topology(degree, topology)
                     manifest = builders[degree](
                         source_path,
                         candidate_root,
                         **build_options,
                     )
-                if degree == 2 and not (resumed and manifest.get("numerical_status") == "NUMERICAL_PASS"):
+                if manifest.get("topology") == "TP2_ROW_REDUCE" and not (resumed and manifest.get("numerical_status") == "NUMERICAL_PASS"):
                     if profile_runner is None:
                         failure = profile_runner_error or ToolError(
                             "GOLDEN_EXECUTION_UNAVAILABLE",
@@ -1070,7 +1155,7 @@ def run_pipeline(
                                 exc.code,
                                 exc.message,
                             )
-                elif degree == 4 and not (resumed and manifest.get("numerical_status") == "NUMERICAL_PASS"):
+                elif manifest.get("topology") == "TP{}_FOUR_STAGE_ALL_GATHER".format(degree) and not (resumed and manifest.get("numerical_status") == "NUMERICAL_PASS"):
                     if profile_runner is None:
                         failure = profile_runner_error or ToolError(
                             "GOLDEN_EXECUTION_UNAVAILABLE",
@@ -1093,7 +1178,7 @@ def run_pipeline(
                             )
                             manifest = _finalize_tp4_golden(candidate_root, manifest, golden_report)
                             if (
-                                auto_repair
+                                auto_repair and degree == 4
                                 and golden_report.get("numerical_status") == "NUMERICAL_FAIL"
                                 and golden_report.get("mismatch_count", 0) > 0
                             ):
@@ -1113,7 +1198,9 @@ def run_pipeline(
                                     ),
                                     mlp_gate_dequant_width_padding_multiplier=(
                                         _scoped_mlp_gate_padding(
-                                            degree, profile, mlp_gate_dequant_width_padding_multiplier
+                                            degree,
+                                            profile,
+                                            mlp_gate_dequant_width_padding_multiplier,
                                         )
                                     ),
                                 )
@@ -1205,22 +1292,14 @@ def run_pipeline(
         # Host exactness is a prerequisite for device testing, not an NPU release
         # claim. Keep the release path closed until the compiled candidate has a
         # separately recorded exact NPU result.
-        tp4_host_exact = (
-            4 in requested_degrees
-            and all(
-                candidate["manifest"].get("host_verification_status") == "HOST_VERIFIED"
-                and candidate["manifest"].get("npu_verification_status") != "NPU_VERIFIED"
-                for candidate in candidate_sets
-                if candidate["manifest"].get("topology") == "TP4_FOUR_STAGE_ALL_GATHER"
-            )
-            and any(candidate["manifest"].get("topology") == "TP4_FOUR_STAGE_ALL_GATHER" for candidate in candidate_sets)
-        )
-        if gate["release_gate"] == "PASS" and tp4_host_exact:
+        npu_unverified = [candidate for candidate in candidate_sets
+                          if candidate["manifest"].get("npu_verification_status") != "NPU_VERIFIED"]
+        if gate["release_gate"] == "PASS" and npu_unverified:
             gate["release_gate"] = "BLOCKED_NPU_UNVERIFIED"
             gate["first_failure"] = "NPU_VERIFICATION_NOT_RUN"
             gate["failures"].insert(
                 0,
-                {"code": "NPU_VERIFICATION_NOT_RUN", "candidate": "TP4"},
+                {"code": "NPU_VERIFICATION_NOT_RUN", "candidate": npu_unverified[0]["label"]},
             )
         if build_failures:
             gate["release_gate"] = "FAIL"
@@ -1243,7 +1322,7 @@ def run_pipeline(
         candidate_manifest = candidate["manifest"]
         candidate_manifest.setdefault("npu_verification_status", "NPU_UNVERIFIED")
         if (
-            candidate_manifest.get("topology") == "TP4_FOUR_STAGE_ALL_GATHER"
+            candidate_manifest.get("topology", "").endswith("_FOUR_STAGE_ALL_GATHER")
             and candidate_manifest.get("host_verification_status") == "HOST_VERIFIED"
             and candidate_manifest.get("npu_verification_status") != "NPU_VERIFIED"
         ):

@@ -20,7 +20,7 @@ For maintainers, see the [engineering handoff](docs/maintainer-handoff.md).
   INT16 BatchMatMul from tensor contracts and its unique ADD consumer, and
   fails closed when the graph match is ambiguous.
 - Golden comparison, bounded automatic repair, and strict release gates.
-- A Mediatek NPU verification backend with input adaptation, exact comparison,
+- A MediaTek NPU verification backend with input adaptation, exact comparison,
   output stitching, and report generation.
 - Synthetic unit tests and a GitHub Actions workflow.
 
@@ -41,7 +41,7 @@ On Windows PowerShell, activate the environment with:
     .\.venv\Scripts\Activate.ps1
 
 The core package depends on NumPy, FlatBuffers, and the TFLite schema package.
-The Mediatek backend uses system OpenSSH commands and tooling supplied by the
+The MediaTek backend uses system OpenSSH commands and tooling supplied by the
 developer or device vendor; it does not install or bundle proprietary runtime
 libraries.
 
@@ -51,38 +51,7 @@ The partitioner starts from supported **per-layer W4A16 TFLite graphs**. It does
 not download model checkpoints, run PTQ, convert PyTorch/Safetensors, or export
 layer TFLite files.
 
-### 1. Download a checkpoint you are authorized to use
-
-For a Hugging Face model, install the Hub client, authenticate locally, and
-pin a model revision so the source can be reproduced:
-
-    python -m pip install -U huggingface_hub
-    hf auth login
-    hf download meta-llama/Llama-3.1-8B-Instruct --revision REPLACE_WITH_COMMIT_SHA --local-dir ./models/llama31
-
-Use the repository and revision you are authorized to access. Gated models may
-require accepting the model license and receiving access first. Keep access
-tokens local; do not put them in scripts, logs, or this repository.
-
-### 2. Convert and quantize to per-layer TFLite
-
-Use a converter and PTQ recipe that support the model and the intended target.
-For Genio 720, obtain the compatible MediaTek Converter/SDK separately and
-follow its supported W4A16 export flow. This repository does not include that
-proprietary toolchain, calibration data, or conversion recipe.
-
-Export one Canonical TFLite graph per transformer layer for each profile you
-intend to partition. Keep P128 and D1 in separate directories, and record the
-model revision, quantization configuration, calibration lineage, converter
-version, input/output tensor contracts, and SHA-256 values. A downloaded
-checkpoint or a single full-model TFLite file is not automatically a
-per-layer source set accepted by this CLI.
-
-Example source layout:
-
-    canonical/
-      P128/  # one supported .tflite source graph per layer
-      D1/    # one supported .tflite source graph per layer
+Prepare authorized per-layer W4A16 TFLite source files using a suitable external conversion and quantization toolchain.
 
 ### 3. Discover and build TP4 candidates
 
@@ -112,27 +81,6 @@ matching Canonical inputs and fixtures. NCC, Neuron Runtime, and Genio hardware
 are supplied separately; they are not installed by this package. Sequential
 rank execution with Host stitching is not a four-device collective.
 
-## Partition a graph
-
-Pass your own supported per-layer TFLite input. This example writes a TP4
-candidate for one D1 layer into a new directory:
-
-    python examples/partition_graph.py .\path\to\layer.tflite .\out\tp4 --tp 4 --profile D1 --expected-layers 1
-
-The example can also be run with a directory containing source graphs.
-Existing output directories are rejected. For direct CLI use:
-
-    tflite-tp build-tp4 --source ./models/layer.tflite --output ./out/tp4 --profile D1 --expected-layers 1
-    tflite-tp build-tp2 --source ./models/layer.tflite --output ./out/tp2 --profile D1 --expected-layers 1
-
-For graph discovery without rewriting:
-
-    tflite-tp discover --source ./models/layer.tflite --expected-layers 1 --report ./discovery.json
-
-Use only models you are authorized to process. The generated graph structure
-does not imply that the model is numerically correct on a host interpreter or
-an NPU.
-
 ## Known limitations
 
 - Experimental support is limited to the graph patterns and W4A16 INT4
@@ -145,10 +93,10 @@ an NPU.
   coverage fail closed.
 - Host Golden execution of vendor custom operators requires a compatible
   interpreter supplied separately.
-- The Mediatek backend requires a separately configured compiler and device;
+- The MediaTek backend requires a separately configured compiler and device;
   hardware verification cannot run in ordinary CI.
 
-See the known-limitations and TP2/TP4 roadmap documents.
+See the [roadmap](docs/roadmap.md).
 
 ## Tests
 
