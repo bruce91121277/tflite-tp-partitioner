@@ -29,6 +29,11 @@ from tflite_tp.tflite_rewriter import (  # noqa: E402
 
 @unittest.skipIf(tflite is None, "TFLite schema dependency is not installed")
 class AttentionContextRewriteTests(unittest.TestCase):
+    def _round_trip(self, model):
+        raw = self.adapter.export(model)
+        self.assertEqual(raw[4:8], b"TFL3")
+        return self.adapter.load_bytes(raw, "fc_width_padding_input.tflite")
+
 
     def setUp(self):
         self.adapter = TFLiteObjectAdapter(tflite)
