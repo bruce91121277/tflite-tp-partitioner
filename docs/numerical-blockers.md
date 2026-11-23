@@ -1,4 +1,4 @@
-# Numerical blockers and evidence matrix — 2026-11-19
+# Numerical blockers and evidence matrix
 
 **Project:** tflite-tp-partitioner, Genio 720, Llama 3.1 8B W4A16.  
 **Current public main baseline when drafted:** 99500df87ba12fb3b3427a23bd10751364acefe7.  
@@ -80,4 +80,4 @@
 
 **Mismatch_count must be an integer only when the comparison actually ran; use null for NOT_RUN.** Keep experimental PASS_FIXTURE_SCOPED, production exactness and inference/token agreement separate. Widening tolerance may be a research policy later but is NOT a replacement for current bit-exact gate.
 
-See also [engineering handoff](handoff-2026-11-19.md), [M9 evidence](m9-tp4-layer0-npu-evidence-20261027.md), [historical numerical verification](numerical-verification.md), and [Issue #1 M18 updates](https://github.com/bruce91121277/tflite-tp-partitioner/issues/1).
+See also [engineering handoff](maintainer-handoff.md), [M9 evidence](m9-tp4-layer0-npu-evidence-20261027.md), [historical numerical verification](numerical-verification.md), and [Issue #1 M18 updates](https://github.com/bruce91121277/tflite-tp-partitioner/issues/1).

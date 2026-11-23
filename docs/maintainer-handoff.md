@@ -12,7 +12,7 @@
 3. **Later private M10–M18 checkpoints:** the latest source available for those measurements is [Issue #1 discussion](https://github.com/bruce91121277/tflite-tp-partitioner/issues/1), last updated 2026-11-02. These are maintainer-supplied private-run summaries, **not** implemented or independently reproduced by public GitHub CI. Some new failures supersede the narrower M9 single-fixture conclusions.
 4. **Newest public change (PR #6):** explains checkpoint download and the external export/PTQ prerequisites; it did not add new numerical repairs or generalize parameter sizes.
 
-See [numerical blockers and first-failure investigation](numerical-blockers-2026-11-19.md). If private evidence is not accessible to the successor, report it as **maintainer-reported, awaiting reproduction**, never as independently certified.
+See [numerical blockers and first-failure investigation](numerical-blockers.md). If private evidence is not accessible to the successor, report it as **maintainer-reported, awaiting reproduction**, never as independently certified.
 
 ## Repository map
 
