@@ -4,9 +4,9 @@
 partitions from supported W4A16 TFLite graphs. Numerical release readiness has
 not been established.
 
-## Engineering handoff (2026-11-19)
+## Engineering handoff
 
-For new maintainers, start with the [engineering handoff](docs/handoff-2026-11-19.md) and the [numerical blocker / evidence matrix](docs/numerical-blockers-2026-11-19.md). These distinguish public-source/CI status from maintainer-reported M10–M18 private NPU experiments, including unresolved D1 position 32/64 and P128 Layer2 numerical failures. **Release remains Experimental / BLOCKED**; GitHub Actions does not certify NPU exactness.
+For new maintainers, start with the [engineering handoff](docs/maintainer-handoff.md) and the [numerical blocker / evidence matrix](docs/numerical-blockers.md). These distinguish public-source/CI status from maintainer-reported M10–M18 private NPU experiments, including unresolved D1 position 32/64 and P128 Layer2 numerical failures. **Release remains Experimental / BLOCKED**; GitHub Actions does not certify NPU exactness.
 
 ## What is implemented
 
