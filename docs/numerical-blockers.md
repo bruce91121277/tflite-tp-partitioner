@@ -4,4 +4,4 @@ The partitioner includes structural checks and tools for host and device compari
 
 Prior investigations found differences in some decode and attention cases, and the TP2 row-reduce arithmetic contract remains unproven. Investigate a reproducible first divergence with matching source, artifact, input, and runtime provenance before drawing conclusions about a new candidate.
 
-See [verification guidance](numerical-verification.md), [historical device evidence](m9-tp4-layer0-npu-evidence-20261027.md), and [Issue #1](https://github.com/bruce91121277/tflite-tp-partitioner/issues/1) for context.
+See [verification guidance](numerical-verification.md) and [Issue #1](https://github.com/bruce91121277/tflite-tp-partitioner/issues/1) for context.
