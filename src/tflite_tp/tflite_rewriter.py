@@ -1644,9 +1644,9 @@ def build_tp4_layer(
     )
 
 
-def build_tp2_layer(model_object, model_info, layer, graph_analysis, output_directory, schema_module=None, topology=None):
-    """Build one TP2 structural candidate, gated on unproven row-reduce semantics."""
-    return _build_tp_layer(model_object, model_info, layer, graph_analysis, output_directory, degree=2, schema_module=schema_module, topology=topology)
+def build_tp2_layer(model_object, model_info, layer, graph_analysis, output_directory, schema_module=None):
+    """Build one TP2 All-Gather structural candidate."""
+    return _build_tp_layer(model_object, model_info, layer, graph_analysis, output_directory, degree=2, schema_module=schema_module)
 
 
 def _build_tp_directory(
@@ -1660,10 +1660,9 @@ def _build_tp_directory(
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
     attention_context_head_padding_multiplier=None,
-    topology=None,
 ):
-    """Discover and build every layer for one profile as an atomic directory."""
-    topology = resolve_topology(degree, topology)
+    """Discover and build every All-Gather layer for one profile as an atomic directory."""
+    topology = resolve_topology(degree)
     source_root = Path(source_directory)
     if not source_root.exists():
         raise ToolError("SOURCE_NOT_FOUND", "source path does not exist: {}".format(source_root))
@@ -1798,7 +1797,7 @@ def _build_tp_directory(
                     )
                 if attention_context_head_padding_multiplier is not None:
                     layer_build_options["attention_context_head_padding_multiplier"] = attention_context_head_padding_multiplier
-                if degree == 2 and topology == "all-gather":
+                if degree == 2:
                     layer_build_options["topology"] = topology
                 layer_manifest = _build_tp_layer_into(
                     model_object,
@@ -2003,9 +2002,8 @@ def build_tp2_directory(
     expected_layers=32,
     schema_module=None,
     discovery_report=None,
-    topology=None,
 ):
-    """Build a TP2 candidate using input-channel O/Down and row-reduce contracts."""
+    """Build a TP2 candidate using output-channel shards and All-Gather contracts."""
     return _build_tp_directory(
         source_directory,
         output_directory,
@@ -2014,5 +2012,4 @@ def build_tp2_directory(
         degree=2,
         schema_module=schema_module,
         discovery_report=discovery_report,
-        topology=topology,
     )

@@ -859,8 +859,7 @@ def run_pipeline(
     if tensor_parallel not in (2, 4, 8, "all"):
         raise ToolError("TP_DEGREE_UNSUPPORTED", "--tp must be 2, 4, 8, or all")
     from .planning import resolve_topology
-    if topology == "row-reduce" and tensor_parallel != 2:
-        raise ToolError("TOPOLOGY_UNSUPPORTED", "row-reduce requires TP2")
+    resolve_topology(2 if tensor_parallel == "all" else tensor_parallel, topology)
     if any(not isinstance(count, int) or isinstance(count, bool) or count <= 0
            for count in (prefill_tokens, decode_tokens)):
         raise ToolError("TOKEN_COUNT_INVALID", "Prefill and Decode token counts must be positive integers")
@@ -1102,8 +1101,6 @@ def run_pipeline(
                                 degree, profile, mlp_gate_dequant_width_padding_multiplier
                             )
                         )
-                    if degree == 2:
-                        build_options["topology"] = resolve_topology(degree, topology)
                     manifest = builders[degree](
                         source_path,
                         candidate_root,

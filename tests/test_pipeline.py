@@ -2270,7 +2270,7 @@ class GoldenBackendTests(unittest.TestCase):
         self.assertEqual([row["layer"] for row in aggregate["models"][24:]], [1] * 24)
         self.assertEqual(aggregate["structural_status"], "STRUCTURAL_PASS")
 
-    def test_tp2_directory_builder_preserves_unproven_row_reduce_evidence_per_layer(self):
+    def test_tp2_directory_builder_keeps_layer_and_aggregate_all_gather_topology_aligned(self):
         from test_discovery import synthetic_grouped_transformer_model
         import tflite_tp.tflite_rewriter as rewriter
 
@@ -2298,8 +2298,9 @@ class GoldenBackendTests(unittest.TestCase):
                 def load(self, path):
                     return SimpleNamespace(subgraphs=[object()])
 
-            def fake_build_layer(model_object, model_info, layer, analysis, output_directory, degree, schema_module=None):
+            def fake_build_layer(model_object, model_info, layer, analysis, output_directory, degree, schema_module=None, topology=None):
                 self.assertEqual(degree, 2)
+                self.assertEqual(topology, "all-gather")
                 models = []
                 for rank in range(2):
                     for component in ("attn", "o", "suffix_attn", "mlp", "down", "suffix_final"):
@@ -2319,17 +2320,11 @@ class GoldenBackendTests(unittest.TestCase):
                         })
                 return {
                     "models": models,
+                    "topology": "TP2_FOUR_STAGE_ALL_GATHER",
                     "numerical_gate": {"status": "GOLDEN_EXECUTION_UNAVAILABLE"},
                     "quantization_contract": {"verified": True},
                     "weight_partitions": {},
-                    "collective_contract": {
-                        "quantized_partial_semantics": {
-                            "status": "UNPROVEN",
-                            "proof_sha256": None,
-                            "partial_output_dtype": {"o": "INT16", "down": "INT16"},
-                            "layer": layer.layer_id,
-                        },
-                    },
+                    "collective_contract": {"row_reduce_boundaries": []},
                 }
 
             with patch.object(rewriter, "TFLiteObjectAdapter", FakeAdapter), patch.object(
@@ -2341,15 +2336,14 @@ class GoldenBackendTests(unittest.TestCase):
                     profile="D1",
                     expected_layers=2,
                     discovery_report=source_report,
-                    topology="row-reduce",
                 )
 
-        partial_semantics = aggregate["collective_contract"]["quantized_partial_semantics"]
         self.assertEqual(aggregate["model_count"], 2 * 2 * 6)
-        self.assertEqual(partial_semantics["status"], "UNPROVEN")
-        self.assertIsNone(partial_semantics["proof_sha256"])
-        self.assertEqual(sorted(partial_semantics["per_layer"]), ["0", "1"])
-        self.assertEqual(partial_semantics["per_layer"]["1"]["partial_output_dtype"]["o"], "INT16")
+        self.assertEqual(aggregate["topology"], "TP2_FOUR_STAGE_ALL_GATHER")
+        self.assertEqual(aggregate["collective_contract"]["row_reduce_boundaries"], [])
+        for layer_id in (0, 1):
+            layer_manifest = json.loads((output_root / "manifests" / "d1_layer{:02d}.json".format(layer_id)).read_text())
+            self.assertEqual(layer_manifest["topology"], aggregate["topology"])
 
     def test_mtk_executor_is_reported_as_candidate_not_tp_golden_pass(self):
         mtk_module = "mtk_converter.python.tools.tflite_executor"

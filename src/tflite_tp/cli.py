@@ -21,7 +21,6 @@ def build_parser():
     parser.add_argument("--prefill", help="Prefill TFLite file or directory")
     parser.add_argument("--decode", help="Decode TFLite file or directory")
     parser.add_argument("--tp", choices=("2", "4", "8", "all"), help="tensor parallel degree; all builds TP2/4/8")
-    parser.add_argument("--topology", choices=("row-reduce", "all-gather"))
     parser.add_argument("--prefill-tokens", type=int, default=128, help="fixed Prefill input token count")
     parser.add_argument("--decode-tokens", type=int, default=1, help="fixed Decode input token count")
     parser.add_argument("--expected-layers", type=int, default=32, help="expected Transformer layer count")
@@ -72,7 +71,7 @@ def build_parser():
         help="include full per-tensor scale/zero-point/min/max arrays in the report",
     )
     for command_name, help_text in (
-        ("build-tp2", "build TP2 All-Gather component candidates (row-reduce only with --topology row-reduce)"),
+        ("build-tp2", "build TP2 All-Gather component candidates"),
         ("build-tp4", "build TP4 output-channel and all-gather component candidates"),
         ("build-tp8", "build TP8 output-channel component candidates"),
     ):
@@ -82,7 +81,6 @@ def build_parser():
         build.add_argument("--profile", default=("auto" if command_name == "build-tp4" else "D1"),
                            help="auto or one fixed-token profile: P<n> for Prefill, D<n> for Decode")
         build.add_argument("--expected-layers", type=int, default=32)
-        build.add_argument("--topology", choices=("row-reduce", "all-gather"))
         if command_name in ("build-tp4", "build-tp8"):
             build.add_argument(
                 "--fc-width-padding-multiplier",
@@ -259,11 +257,7 @@ def main(argv=None):
                 "expected_layers": args.expected_layers,
             }
             build_args["discovery_report"] = discovery_report
-            from .planning import resolve_topology
             degree = {"build-tp2": 2, "build-tp4": 4, "build-tp8": 8}[args.command]
-            topology = resolve_topology(degree, args.topology)
-            if degree == 2:
-                build_args["topology"] = topology
             if args.command in ("build-tp4", "build-tp8"):
                 from .planning import resolve_qkv_padding
                 multiplier, _decision = resolve_qkv_padding(degree, profile, args.fc_width_padding_multiplier)
@@ -330,7 +324,6 @@ def main(argv=None):
                 mlp_gate_dequant_width_padding_multiplier=mlp_padding_multiplier,
                 prefill_tokens=args.prefill_tokens,
                 decode_tokens=args.decode_tokens,
-                topology=args.topology,
             )
         except ToolError as exc:
             print(json.dumps({

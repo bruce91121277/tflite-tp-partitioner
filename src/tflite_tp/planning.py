@@ -71,10 +71,9 @@ def _collective_contract(degree, tokens, hidden_size, intermediate_size, q_width
 def resolve_topology(degree, topology=None):
     if degree not in (2, 4, 8):
         raise ToolError("TP_DEGREE_UNSUPPORTED", "supported tensor-parallel degrees are 2, 4 and 8")
-    # All degrees default to the four-stage All-Gather contract; TP2 row-reduce is an explicit legacy option.
     topology = topology or "all-gather"
-    if topology not in ("row-reduce", "all-gather") or (topology == "row-reduce" and degree != 2):
-        raise ToolError("TOPOLOGY_UNSUPPORTED", "unsupported topology {} for TP{}".format(topology, degree))
+    if topology != "all-gather":
+        raise ToolError("TOPOLOGY_UNSUPPORTED", "only all-gather is supported")
     return topology
 
 

@@ -10,7 +10,7 @@ not been established.
 - TP2, TP4 and TP8 component planning and graph rewriting.
 - Fixed-token Prefill `P<n>` and Decode `D<n>` source profiles, including indexed layers.
 - `build-tail` vocabulary partitioning for TP2, TP4 and TP8.
-- Four-stage All-Gather by default; TP2 row-reduce is available with `--topology row-reduce`.
+- Four-stage All-Gather for TP2, TP4 and TP8.
 - Packed INT4 weight slicing with quantization metadata rewriting.
 - An opt-in experimental TP4 P128 MLP Gate width rewrite that can generate structural
   candidates for supported layers. Numerical verification remains SHA-bound
@@ -41,7 +41,7 @@ The default All-Gather layout contains six components per layer and four All-Gat
 | Up | Output channel (column) |
 | Down | Output channel (column) |
 
-The optional TP2 row-reduce topology splits O and Down by input channel. MLP Gate padding and the experimental attention-context rewrite are opt-in and disabled by default. Q/K/V padding defaults to the selected rule for P128 and D1; other profiles require explicit opt-in.
+TP2, TP4 and TP8 use the same All-Gather topology. MLP Gate padding and the experimental attention-context rewrite are opt-in and disabled by default. Q/K/V padding defaults to the selected rule for P128 and D1; other profiles require explicit opt-in.
 
 ## Install
 

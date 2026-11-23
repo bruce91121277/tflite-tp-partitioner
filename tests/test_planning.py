@@ -284,22 +284,10 @@ class PartitionPlanningTests(unittest.TestCase):
         from tflite_tp.planning import resolve_topology
         self.assertEqual(resolve_topology(2), "all-gather")
         self.assertEqual(make_partition_plan(complete_layer(), degree=2).to_dict()["topology"], "TP2_FOUR_STAGE_ALL_GATHER")
-        self.assertEqual(resolve_topology(2, "row-reduce"), "row-reduce")
+        with self.assertRaisesRegex(ToolError, "only all-gather is supported"):
+            resolve_topology(2, "row-reduce")
         with self.assertRaises(ToolError):
-            resolve_topology(4, "row-reduce")
-
-    def test_tp2_explicit_row_reduce_for_o_and_down(self):
-        plan = make_partition_plan(complete_layer(), degree=2, topology="row-reduce").to_dict()
-        roles = {item["role"]: item for item in plan["projections"]}
-        self.assertEqual(plan["topology"], "TP2_ROW_REDUCE")
-        self.assertEqual(roles["q"]["slice_axis"], 0)
-        self.assertEqual(roles["o"]["slice_axis"], 1)
-        self.assertEqual(roles["o"]["bias_policy"], "RANK0_ONLY")
-        self.assertEqual(roles["down"]["slice_axis"], 1)
-        self.assertEqual(roles["down"]["bias_policy"], "RANK0_ONLY")
-        self.assertEqual(len(plan["collective_contract"]["row_reduce_boundaries"]), 2)
-        self.assertEqual(plan["collective_contract"]["all_gather_boundaries"], [])
-        self.assertEqual(plan["release_status"], "NOT_ELIGIBLE")
+            make_partition_plan(complete_layer(), degree=2, topology="row-reduce")
 
     def test_tp2_all_gather_plan(self):
         plan = make_partition_plan(complete_layer(), degree=2, topology="all-gather").to_dict()
