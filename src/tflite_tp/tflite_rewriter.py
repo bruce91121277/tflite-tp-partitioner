@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import shutil
 import struct
-import tempfile
+import time
+import uuid
 
 import numpy as np
 
@@ -19,10 +20,10 @@ from .flatbuffer_adapter import (
     normalize_host_scalar_constant_shapes,
 )
 from .golden import probe_golden_backend
-from .model import ModelInfo, QuantizationInfo, TensorInfo, quantization_dict, validate_graph
+from .model import ModelInfo, QuantizationInfo, TensorInfo, profile_token_count, quantization_dict, validate_graph
 from .packed_int4 import reconstruct_packed_int4, slice_packed_int4, slice_quantization
 from .partition import ComponentSpec, derive_tp_components, derive_tp4_components
-from .planning import _collective_contract
+from .planning import VERIFIED_QKV_PADDING_PROFILES, _collective_contract, qkv_padding_status, resolve_topology
 from .tflite_reader import read_tflite_bytes
 
 
@@ -37,6 +38,12 @@ _COMPONENT_FOR_ROLE = {
     "up": "mlp",
     "down": "down",
 }
+
+
+def _create_staging_directory(output_root):
+    temporary_root = output_root.parent / "{}-build-{}".format(output_root.name, uuid.uuid4().hex)
+    temporary_root.mkdir()
+    return temporary_root
 
 
 def _array_values(value):
@@ -138,7 +145,8 @@ def _slice_bias(model, tensor, start, count, expected_outputs):
     return raw, sliced_bytes
 
 
-def _prepare_projection_shards(model, layer, degree, schema):
+def _prepare_projection_shards(model, layer, degree, schema, topology=None):
+    topology = resolve_topology(degree, topology)
     graph = model.subgraphs[layer.graph_index]
     specifications = {}
     manifest = {}
@@ -149,7 +157,7 @@ def _prepare_projection_shards(model, layer, degree, schema):
             raise ToolError("SOURCE_WEIGHT_SHAPE_CHANGED", "{} shape changed after discovery".format(role))
         if int(tensor.type) != int(getattr(schema.TensorType, "INT4")):
             raise ToolError("PROJECTION_DTYPE_UNSUPPORTED", "{} is not INT4".format(role))
-        slice_axis = 1 if degree == 2 and role in ("o", "down") else 0
+        slice_axis = 1 if topology == "row-reduce" and role in ("o", "down") else 0
         extent = source_shape[slice_axis]
         if extent % degree:
             axis_name = "input" if slice_axis == 1 else "output"
@@ -380,7 +388,7 @@ def _compact_graph_buffers(model, graph):
 
 
 def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, adapter, profile, restore_slice=True):
-    """Pad a rank-local FC output, optionally preserving the padded width for a following op."""
+    """Pad a sharded Q/K/V FC's output width and slice back to the rank width."""
     if int(multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
         raise ToolError(
             "FC_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
@@ -405,7 +413,7 @@ def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, ad
     output_shape = _shape(output)
     if len(source_shape) != 2 or len(output_shape) != 3 or output_shape[-1] != source_shape[0]:
         raise ToolError("FC_WIDTH_PADDING_SHAPE_UNSUPPORTED", "{} FC shapes are weight={} output={}".format(role, source_shape, output_shape))
-    expected_tokens = {"P128": 128, "D1": 1}.get(profile)
+    expected_tokens = profile_token_count(profile)
     if expected_tokens is None or output_shape[-2] != expected_tokens:
         raise ToolError(
             "FC_WIDTH_PADDING_PROFILE_UNSUPPORTED",
@@ -496,13 +504,12 @@ def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, ad
             model.operatorCodes.append(slice_code)
             slice_opcode_index = len(model.operatorCodes) - 1
 
-        slice_options = _ObjectTable("SliceOptions", adapter)
         slice_op = _ObjectTable("Operator", adapter)
         slice_op.opcodeIndex = slice_opcode_index
         slice_op.inputs = np.asarray([padded_output_index, begin_index, size_index], dtype=np.int32)
         slice_op.outputs = np.asarray([output_index], dtype=np.int32)
         slice_op.builtinOptionsType = int(getattr(adapter.schema.BuiltinOptions, "SliceOptions"))
-        slice_op.builtinOptions = slice_options
+        slice_op.builtinOptions = _ObjectTable("SliceOptions", adapter)
         slice_op.customOptionsFormat = int(getattr(adapter.schema.CustomOptionsFormat, "FLEXBUFFERS", 0))
         graph.operators.insert(operator_index + 1, slice_op)
     return {
@@ -522,10 +529,8 @@ def _pad_rank_local_fc_output(model, graph, operator_index, role, multiplier, ad
     }
 
 
-
-
 def _append_slice_operator(model, graph, input_index, output_index, output_shape, adapter, name):
-    """Append a TFLite SLICE that restores an existing tensor's public shape."""
+    """Append a TFLite SLICE that restores the original FP32 tensor shape."""
     output_shape = tuple(int(value) for value in output_shape)
     begin = np.zeros(len(output_shape), dtype="<i4")
     size = np.asarray(output_shape, dtype="<i4")
@@ -549,7 +554,7 @@ def _append_slice_operator(model, graph, input_index, output_index, output_shape
     graph.tensors.append(shape_tensor(name + "/begin", begin_buffer))
     size_index = len(graph.tensors)
     graph.tensors.append(shape_tensor(name + "/size", size_buffer))
-    slice_opcode_index = None
+    slice_code_index = None
     placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
     slice_code = int(adapter.schema.BuiltinOperator.SLICE)
     for index, item in enumerate(model.operatorCodes):
@@ -557,18 +562,18 @@ def _append_slice_operator(model, graph, input_index, output_index, output_shape
         if builtin == placeholder:
             builtin = int(item.deprecatedBuiltinCode)
         if builtin == slice_code and not getattr(item, "customCode", None):
-            slice_opcode_index = index
+            slice_code_index = index
             break
-    if slice_opcode_index is None:
+    if slice_code_index is None:
         code = _ObjectTable("OperatorCode", adapter)
         code.builtinCode = slice_code
         code.deprecatedBuiltinCode = slice_code
         code.version = 1
         code.customCode = None
         model.operatorCodes.append(code)
-        slice_opcode_index = len(model.operatorCodes) - 1
+        slice_code_index = len(model.operatorCodes) - 1
     op = _ObjectTable("Operator", adapter)
-    op.opcodeIndex = slice_opcode_index
+    op.opcodeIndex = slice_code_index
     op.inputs = np.asarray([int(input_index), begin_index, size_index], dtype=np.int32)
     op.outputs = np.asarray([int(output_index)], dtype=np.int32)
     op.builtinOptionsType = int(adapter.schema.BuiltinOptions.SliceOptions)
@@ -578,53 +583,52 @@ def _append_slice_operator(model, graph, input_index, output_index, output_shape
 
 
 def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, degree, multiplier, adapter):
-    """Pad rank-local Gate INT4 output width before Dequantize, then slice FP32."""
+    """Pad the Gate INT4 FC width and place DEQUANTIZE before the FP32 Slice.
+
+    This is a separate opt-in rule from Q/K/V padding. It keeps the effective
+    Rank-local INT4 payload and public component shape, while making the NPU
+    DEQUANTIZE tensor wider. Saved NPU evidence covers only TP4 P128 Layer0
+    MLP Rank0-3; TP8 P128/D1 and other layers remain experimental.
+    """
     if multiplier is None:
         return []
     if int(multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
         raise ToolError(
             "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-            "only multiplier {} is supported; every new candidate SHA requires same-backend NPU retest".format(_VERIFIED_FC_WIDTH_PADDING_MULTIPLIER),
+            "only multiplier {} has NPU evidence for the current TP4 MLP Gate rule".format(
+                _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER
+            ),
         )
-    if degree != 4:
-        raise ToolError("MLP_GATE_WIDTH_PADDING_PROFILE_UNSUPPORTED", "MLP Gate Dequant padding requires TP4")
-    if layer.profile != "P128":
+    if degree not in (4, 8):
+        raise ToolError(
+            "MLP_GATE_WIDTH_PADDING_PROFILE_UNSUPPORTED",
+            "MLP Gate Dequant width padding requires TP4 or TP8",
+        )
+    if degree not in (4, 8) or profile_token_count(layer.profile) is None:
         raise ToolError(
             "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
-            "structural MLP Gate padding candidates are limited to TP4 P128; other profiles remain unsupported",
+            "MLP Gate Dequant requires TP4/TP8 and a fixed token profile",
         )
     if component.name != "mlp":
         return []
 
-    gate_role = getattr(layer, "roles", {}).get("gate")
-    source_operator_index = int(getattr(gate_role, "operator_index", -1)) if gate_role is not None else -1
-    source_to_local = {
-        int(source_index): local_index
-        for local_index, source_index in enumerate(getattr(component, "operator_indices", ()))
-    }
-    if source_operator_index not in source_to_local:
-        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "component does not contain the discovered Gate FC")
-    fc_index = source_to_local[source_operator_index]
-    if fc_index < 0 or fc_index >= len(graph.operators):
-        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "Gate FC operator remap is out of range")
-    fc = graph.operators[fc_index]
-    if len(fc.inputs) != 3 or len(fc.outputs) != 1:
-        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "discovered Gate FC has an unsupported rank-local signature")
-    weight_index = int(fc.inputs[1])
-    expected_weight_name = getattr(gate_role, "tensor_name", "")
-    actual_weight_name = getattr(graph.tensors[weight_index], "name", "")
-    if isinstance(actual_weight_name, bytes):
-        actual_weight_name = actual_weight_name.decode("utf-8")
-    if expected_weight_name and str(actual_weight_name) != str(expected_weight_name):
-        raise ToolError(
-            "MLP_GATE_FC_MAPPING_AMBIGUOUS",
-            "remapped Gate FC weight name does not match discovery: {} != {}".format(actual_weight_name, expected_weight_name),
-        )
+    gate_matches = []
+    for index, op in enumerate(graph.operators):
+        if len(op.inputs) != 3 or len(op.outputs) != 1:
+            continue
+        code = model.operatorCodes[int(op.opcodeIndex)]
+        custom = getattr(code, "customCode", None)
+        if isinstance(custom, bytes):
+            custom = custom.decode("utf-8")
+        weight_name = str(graph.tensors[int(op.inputs[1])].name or "")
+        if custom == "MTKEXT_FULLY_CONNECTED" and "mlp/gate_proj/weight" in weight_name:
+            gate_matches.append((index, op))
+    if len(gate_matches) != 1:
+        raise ToolError("MLP_GATE_FC_MAPPING_AMBIGUOUS", "expected one rank-local Gate FC in the MLP component")
+    fc_index, fc = gate_matches[0]
     local_gate_output = int(fc.outputs[0])
 
     def is_dequantize(op):
-        if len(op.inputs) != 1 or len(op.outputs) != 1:
-            return False
         code = model.operatorCodes[int(op.opcodeIndex)]
         if getattr(code, "customCode", None):
             return False
@@ -634,14 +638,13 @@ def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, d
             builtin = int(code.deprecatedBuiltinCode)
         return builtin == int(adapter.schema.BuiltinOperator.DEQUANTIZE)
 
-    consumers = [op for op in graph.operators if local_gate_output in tuple(int(x) for x in op.inputs)]
-    dequant_matches = [op for op in consumers if is_dequantize(op) and int(op.inputs[0]) == local_gate_output]
-    if len(consumers) != 1 or len(dequant_matches) != 1:
-        raise ToolError(
-            "MLP_GATE_DEQUANT_MAPPING_AMBIGUOUS",
-            "Gate output must have exactly one DEQUANTIZE consumer",
-        )
-    dequant = dequant_matches[0]
+    matches = [
+        op for op in graph.operators
+        if is_dequantize(op) and len(op.inputs) == 1 and int(op.inputs[0]) == local_gate_output and len(op.outputs) == 1
+    ]
+    if len(matches) != 1:
+        raise ToolError("MLP_GATE_DEQUANT_MAPPING_AMBIGUOUS", "expected one Gate DEQUANTIZE consumer")
+    dequant = matches[0]
     local_dequant_output = int(dequant.outputs[0])
     local_dequant = graph.tensors[local_dequant_output]
     local_shape = tuple(int(value) for value in np.asarray(local_dequant.shape).reshape(-1))
@@ -651,7 +654,10 @@ def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, d
     padding_report = _pad_rank_local_fc_output(
         model, graph, fc_index, "mlp.gate", int(multiplier), adapter, layer.profile, restore_slice=False
     )
+    # Keep the FC output padded through DEQUANTIZE; a Slice here would reinstate
+    # the failing rank-width dequant path.
     padded_gate_output = int(fc.outputs[0])
+
     padded_shape = local_shape[:-1] + (local_shape[-1] * int(multiplier),)
     padded_dequant = copy.deepcopy(local_dequant)
     old_name = local_dequant.name.decode("utf-8") if isinstance(local_dequant.name, bytes) else str(local_dequant.name)
@@ -683,15 +689,16 @@ def _apply_mlp_gate_dequant_width_padding_rule(model, graph, layer, component, d
         "stage": "GATE_FC_PADDED_INT16_DEQUANTIZED_BEFORE_FP32_SLICE",
         "padded_dequant_output_shape": list(padded_shape),
         "rank_dequant_output_shape": list(local_shape),
-        "numerical_scope": "STRUCTURAL_REWRITE_ONLY_REQUIRES_SHA_BOUND_NPU_RETEST",
-        "npu_verification_status": "NOT_VERIFIED_FOR_NEW_CANDIDATE_SHA",
+        "numerical_scope": "SAVED_NPU_EXACT_EVIDENCE_COVERS_TP4_P128_LAYER0_MLP_RANKS_0_1_2_3_ONLY",
+        "candidate_numerical_status": "NOT_RUN_REQUIRES_SHA_BOUND_NPU_GOLDEN",
+        "formal_profile_status": "CANDIDATE_REQUIRES_SHA_BOUND_NPU_GOLDEN",
     }]
 
 
 def _apply_fc_width_padding_rule(model, graph, layer, component, degree, multiplier, adapter):
     if multiplier is None:
         return []
-    if degree != 4 or layer.profile not in ("P128", "D1") or component.name != "attn":
+    if degree not in (4, 8) or profile_token_count(layer.profile) is None or component.name != "attn":
         return []
     original_to_local = {int(source_index): index for index, source_index in enumerate(component.operator_indices)}
     targets = []
@@ -700,7 +707,10 @@ def _apply_fc_width_padding_rule(model, graph, layer, component, degree, multipl
         if match is not None and int(match.operator_index) in original_to_local:
             targets.append((original_to_local[int(match.operator_index)], role))
     if not targets:
-        raise ToolError("FC_WIDTH_PADDING_TARGETS_MISSING", "P128 TP4 attention component contains no Q/K/V FC")
+        raise ToolError(
+            "FC_WIDTH_PADDING_TARGETS_MISSING",
+            "TP{} {} attention component contains no Q/K/V FC".format(degree, layer.profile),
+        )
     result = []
     for local_index, role in sorted(targets, key=lambda item: item[0], reverse=True):
         result.append(_pad_rank_local_fc_output(model, graph, local_index, role, multiplier, adapter, layer.profile))
@@ -708,6 +718,318 @@ def _apply_fc_width_padding_rule(model, graph, layer, component, degree, multipl
     for item in result:
         item["buffer_compaction"] = buffer_compaction
     return list(reversed(result))
+
+
+def _normalize_host_scalar_constant_shapes(model, graph, layer, component, degree, adapter):
+    """Give one-element scalar constants vector shapes accepted by the Host importer.
+
+    This is limited to attention constants consumed only as SPLIT axis
+    operands or broadcast MUL constants. The scalar bytes and quantization stay
+    unchanged. The compatibility form matches existing rank-local TFLites.
+    """
+    if degree != 4 or profile_token_count(layer.profile) is None or component.name != "attn":
+        return []
+    return normalize_host_scalar_constant_shapes(model, graph, adapter.schema)
+
+
+def _mutate_int32_constant(model, graph, tensor_index, values, schema):
+    tensor = graph.tensors[tensor_index]
+    if int(tensor.type) != int(getattr(schema.TensorType, "INT32")):
+        raise ToolError("SHAPE_CONSTANT_DTYPE_UNSUPPORTED", "tensor {} is not INT32".format(tensor_index))
+    values = np.asarray(values, dtype="<i4").reshape(-1)
+    _replace_buffer_data(model, tensor, values.tobytes())
+
+
+def _apply_shape_constants(model, graph, model_info, layer, component, adapter):
+    source_graph = model_info.graphs[0]
+    reshape_code = int(getattr(adapter.schema.BuiltinOperator, "RESHAPE"))
+    slice_code = int(getattr(adapter.schema.BuiltinOperator, "STRIDED_SLICE"))
+    pending_constant_edits = {}
+    for operator_index in component.operator_indices:
+        op = graph.operators[operator_index]
+        if int(op.opcodeIndex) < 0 or int(op.opcodeIndex) >= len(model.operatorCodes):
+            continue
+        code = model.operatorCodes[int(op.opcodeIndex)]
+        builtin = int(code.builtinCode)
+        placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
+        if builtin == placeholder:
+            builtin = int(code.deprecatedBuiltinCode)
+        if builtin == reshape_code and len(op.outputs) == 1:
+            output_index = int(op.outputs[0])
+            target_shape = _shape(graph.tensors[output_index])
+            options = getattr(op, "builtinOptions", None)
+            if options is not None:
+                options.newShape = np.asarray(target_shape, dtype=np.int32)
+            if len(op.inputs) > 1 and int(op.inputs[1]) >= 0:
+                shape_tensor_index = int(op.inputs[1])
+                shape_tensor = graph.tensors[shape_tensor_index]
+                if _tensor_data(model, shape_tensor):
+                    previous = pending_constant_edits.get(shape_tensor_index)
+                    if previous is not None and tuple(previous) != tuple(target_shape):
+                        raise ToolError("SHARED_SHAPE_CONSTANT_CONFLICT", str(shape_tensor_index))
+                    pending_constant_edits[shape_tensor_index] = target_shape
+        elif builtin == slice_code and len(op.inputs) > 2 and int(op.inputs[2]) >= 0:
+            data_tensor_index = int(op.inputs[0])
+            end_tensor_index = int(op.inputs[2])
+            source_shape = source_graph.tensors[data_tensor_index].shape
+            target_shape = _shape(graph.tensors[data_tensor_index])
+            if len(source_shape) != len(target_shape):
+                raise ToolError("STRIDED_SLICE_RANK_CHANGED", str(operator_index))
+            end_tensor = graph.tensors[end_tensor_index]
+            raw = _tensor_data(model, end_tensor)
+            if len(raw) % 4:
+                raise ToolError("STRIDED_SLICE_END_CONSTANT_INVALID", str(end_tensor_index))
+            values = np.frombuffer(raw, dtype="<i4").copy()
+            if len(values) == len(source_shape):
+                for axis, (before, after) in enumerate(zip(source_shape, target_shape)):
+                    if after < before and int(values[axis]) == before:
+                        values[axis] = after
+                pending_constant_edits[end_tensor_index] = tuple(int(value) for value in values)
+    for tensor_index, values in pending_constant_edits.items():
+        _mutate_int32_constant(model, graph, tensor_index, values, adapter.schema)
+
+
+def _attention_head_axes(model, graph, source_graph, layer, component):
+    """Trace head axes from projection reshapes and cache inputs through attention."""
+    tokens = profile_token_count(layer.profile)
+    heads = {layer.query_heads, layer.kv_heads}
+    tagged = {}
+    for role in ('q', 'k', 'v'):
+        for index in layer.roles[role].output_tensor_indices:
+            tagged[int(index)] = None
+    for index in component.input_tensor_indices:
+        tensor = source_graph.tensors[index]
+        name = tensor.name.lower()
+        if len(tensor.shape) == 4 and 'past' in name and ('key' in name or 'value' in name):
+            candidates = [axis for axis in (1, 2) if tensor.shape[axis] == layer.kv_heads]
+            if len(candidates) != 1:
+                raise ToolError('ATTENTION_HEAD_AXIS_AMBIGUOUS', tensor.name)
+            tagged[index] = candidates[0]
+
+    operators = {operator.index: operator for operator in source_graph.operators}
+    for operator_index in component.operator_indices:
+        op = operators[operator_index]
+        inputs = [index for index in op.inputs if index >= 0 and index in tagged]
+        if not inputs:
+            continue
+        input_axes = {tagged[index] for index in inputs if tagged[index] is not None}
+        if len(input_axes) > 1:
+            raise ToolError('ATTENTION_HEAD_AXIS_AMBIGUOUS', 'operator {}'.format(operator_index))
+        axis = next(iter(input_axes)) if input_axes else None
+        if op.opcode == 'TRANSPOSE' and axis is not None:
+            if len(op.inputs) < 2 or op.inputs[1] < 0:
+                raise ToolError('ATTENTION_TRANSPOSE_PERMUTATION_MISSING', str(operator_index))
+            raw = _tensor_data(model, graph.tensors[op.inputs[1]])
+            if len(raw) != 16:
+                raise ToolError('ATTENTION_TRANSPOSE_PERMUTATION_INVALID', str(operator_index))
+            perm = list(np.frombuffer(raw, dtype='<i4'))
+            if sorted(perm) != [0, 1, 2, 3]:
+                raise ToolError('ATTENTION_TRANSPOSE_PERMUTATION_INVALID', str(operator_index))
+            axis = perm.index(axis)
+        for output_index in op.outputs:
+            if output_index < 0:
+                continue
+            output = source_graph.tensors[output_index]
+            if len(output.shape) == 3:
+                tagged[output_index] = None
+                continue
+            if len(output.shape) != 4:
+                continue
+            output_axis = axis
+            if output_axis is None:
+                if (op.opcode != 'RESHAPE' or output.shape[1] != tokens
+                        or output.shape[2] not in heads or output.shape[3] != layer.head_dim):
+                    raise ToolError('ATTENTION_HEAD_AXIS_AMBIGUOUS', output.name)
+                output_axis = 2
+            if output_axis not in (1, 2) or output.shape[output_axis] not in heads:
+                raise ToolError('ATTENTION_HEAD_AXIS_AMBIGUOUS', output.name)
+            tagged[output_index] = output_axis
+    for index in component.output_tensor_indices:
+        tensor = source_graph.tensors[index]
+        if len(tensor.shape) == 4 and index not in tagged:
+            raise ToolError('ATTENTION_HEAD_AXIS_AMBIGUOUS', tensor.name)
+    return {index: axis for index, axis in tagged.items() if axis is not None}
+
+
+def _adjust_attention_shapes(model, graph, layer, component, rank, degree, source_graph=None):
+    if not all(value is not None and value > 0 for value in (layer.query_heads, layer.kv_heads)):
+        raise ToolError("HEAD_GEOMETRY_UNRESOLVED", "cannot split attention cache tensors without discovered query/KV heads")
+    tokens = profile_token_count(layer.profile)
+    touched = set(component.input_tensor_indices) | set(component.output_tensor_indices)
+    for operator_index in component.operator_indices:
+        op = graph.operators[operator_index]
+        touched.update(int(index) for index in op.inputs if int(index) >= 0)
+        touched.update(int(index) for index in op.outputs if int(index) >= 0)
+    head_sizes = {layer.query_heads, layer.kv_heads}
+    ambiguous = tokens in head_sizes or any(
+        len(_shape(graph.tensors[index])) == 4
+        and sum(_shape(graph.tensors[index])[axis] in head_sizes for axis in (1, 2)) > 1
+        for index in touched
+    )
+    traced_axes = None
+    if ambiguous:
+        if source_graph is None:
+            raise ToolError("ATTENTION_HEAD_AXIS_AMBIGUOUS", "source graph is required for {}".format(layer.profile))
+        traced_axes = _attention_head_axes(model, graph, source_graph, layer, component)
+    for tensor_index in sorted(touched):
+        tensor = graph.tensors[tensor_index]
+        shape = list(_shape(tensor))
+        if len(shape) == 4:
+            # Attention tensors appear in both [batch, heads, seq, width] and
+            # [batch, seq, heads, width] layouts in the canonical export.
+            if traced_axes is None:
+                head_axes = [axis for axis in (1, 2) if shape[axis] in head_sizes]
+            else:
+                head_axes = [traced_axes[tensor_index]] if tensor_index in traced_axes else []
+            if len(head_axes) > 1:
+                raise ToolError(
+                    "ATTENTION_HEAD_AXIS_AMBIGUOUS",
+                    "tensor {} shape {} has multiple candidate head axes".format(tensor.name, tuple(shape)),
+                )
+            if head_axes:
+                axis = head_axes[0]
+                if shape[axis] % degree:
+                    raise ToolError(
+                        "ATTENTION_HEADS_NOT_DIVISIBLE",
+                        "tensor {} head dimension {} does not divide by {}".format(tensor.name, shape[axis], degree),
+                    )
+                shape[axis] //= degree
+                _set_shape(tensor, shape)
+    context_index = layer.roles["o"].activation_tensor_index
+    context = graph.tensors[context_index]
+    context_shape = list(_shape(context))
+    context_width = layer.roles["o"].shape[1]
+    if not context_shape or context_shape[-1] != context_width:
+        raise ToolError("ATTENTION_CONTEXT_SHAPE_UNSUPPORTED", "{} != {}".format(context_shape, context_width))
+    context_shape[-1] //= degree
+    _set_shape(context, context_shape)
+
+
+def _adjust_mlp_shapes(model, graph, layer, component, degree):
+    intermediate_size = layer.roles["gate"].shape[0]
+    touched = set(component.input_tensor_indices) | set(component.output_tensor_indices)
+    for operator_index in component.operator_indices:
+        op = graph.operators[operator_index]
+        touched.update(int(index) for index in op.inputs if int(index) >= 0)
+        touched.update(int(index) for index in op.outputs if int(index) >= 0)
+    for tensor_index in sorted(touched):
+        tensor = graph.tensors[tensor_index]
+        shape = list(_shape(tensor))
+        if shape and shape[-1] == intermediate_size:
+            shape[-1] //= degree
+            _set_shape(tensor, shape)
+
+
+def _prune_model(model, graph, component):
+    for field_name in ("metadata", "metadataBuffer", "signatureDefs"):
+        value = getattr(model, field_name, None)
+        if value:
+            raise ToolError(
+                "MODEL_METADATA_REMAP_UNSUPPORTED",
+                "cannot safely prune model-level {} for a component graph".format(field_name),
+            )
+    selected = set(component.operator_indices)
+    tensors = graph.tensors
+    tensor_ids = sorted(
+        set(component.input_tensor_indices)
+        | set(component.output_tensor_indices)
+        | {
+            int(index)
+            for operator_index in selected
+            for index in list(graph.operators[operator_index].inputs) + list(graph.operators[operator_index].outputs)
+            if int(index) >= 0
+        }
+    )
+    remap = {old: new for new, old in enumerate(tensor_ids)}
+    selected_operators = [graph.operators[index] for index in component.operator_indices]
+    buffers = sorted({int(tensors[index].buffer) for index in tensor_ids} | {0})
+    buffer_remap = {old: new for new, old in enumerate(buffers)}
+    for tensor_index in tensor_ids:
+        tensors[tensor_index].buffer = buffer_remap[int(tensors[tensor_index].buffer)]
+    model.buffers = [model.buffers[index] for index in buffers]
+    graph.tensors = [tensors[index] for index in tensor_ids]
+    for op in selected_operators:
+        op.inputs = np.asarray([remap[int(index)] if int(index) >= 0 else -1 for index in op.inputs], dtype=np.int32)
+        op.outputs = np.asarray([remap[int(index)] for index in op.outputs], dtype=np.int32)
+    graph.operators = selected_operators
+    graph.inputs = np.asarray([remap[index] for index in component.input_tensor_indices], dtype=np.int32)
+    graph.outputs = np.asarray([remap[index] for index in component.output_tensor_indices], dtype=np.int32)
+    for field_name in ("metadata", "metadataBuffer", "signatureDefs"):
+        if hasattr(model, field_name):
+            setattr(model, field_name, None)
+    return remap
+
+
+def _io_contract(parsed_model, graph_index=0):
+    graph = parsed_model.graphs[graph_index]
+
+    def ports(indices):
+        return [
+            {
+                "index": index,
+                "name": graph.tensors[index].name,
+                "shape": list(graph.tensors[index].shape),
+                "dtype": graph.tensors[index].dtype,
+                "buffer_bytes": graph.tensors[index].buffer_bytes,
+            }
+            for index in indices
+        ]
+
+    return {"inputs": ports(graph.inputs), "outputs": ports(graph.outputs)}
+
+
+def _validate_serialized_component(data, source_name, schema_module):
+    parsed = read_tflite_bytes(data, source_name=source_name, schema_module=schema_module)
+    if parsed.version != 3 or len(parsed.graphs) != 1:
+        raise ToolError("SERIALIZED_COMPONENT_UNSUPPORTED", "expected TFLite v3 with one subgraph")
+    graph = parsed.graphs[0]
+    validate_graph(parsed, graph)
+    return parsed
+
+
+def _tp2_row_reduce_semantics(graph, layer):
+    """Describe the canonical row-reduce tensors without claiming a proof.
+
+    A TFLite graph records each projection's output tensor contract, but it
+    does not by itself define how rank-local accumulators are combined. Keep
+    the observed dtype, shape, and quantization metadata beside the explicit
+    unknowns so the release gate can require a separate bit-exact proof.
+    """
+    partial_outputs = {}
+    output_dtypes = {}
+    for role in ("o", "down"):
+        output_index = layer.roles[role].output_tensor_indices[0]
+        tensor = graph.tensors[output_index]
+        output_dtypes[role] = tensor.dtype
+        partial_outputs[role] = {
+            "tensor_index": tensor.index,
+            "tensor_name": tensor.name,
+            "dtype": tensor.dtype,
+            "shape": list(tensor.shape),
+            "quantization": quantization_dict(tensor.quantization),
+        }
+    observed = ", ".join(
+        "{}={}".format(role.upper(), output_dtypes[role])
+        for role in ("o", "down")
+    )
+    return {
+        "status": "UNPROVEN",
+        "proof_sha256": None,
+        "partial_output_dtype": output_dtypes,
+        "partial_outputs": partial_outputs,
+        "bias_ownership": {"o": "RANK0_ONLY", "down": "RANK0_ONLY"},
+        "accumulator_width": "UNPROVEN",
+        "reduction_order": "UNPROVEN",
+        "rounding_mode": "UNPROVEN",
+        "saturation": "UNPROVEN",
+        "requantization": "UNPROVEN",
+        "reason": (
+            "Canonical output metadata reports {}. It does not establish the "
+            "cross-rank accumulator width, reduction order, rounding, "
+            "saturation, and requantization needed for bit-exact TP2 row "
+            "reduction."
+        ).format(observed),
+    }
 
 
 def _operator_builtin_code(model, operator, schema):
@@ -1005,237 +1327,6 @@ def _apply_attention_context_head_padding(model, graph, layer, component, degree
     }
 
 
-def _normalize_host_scalar_constant_shapes(model, graph, layer, component, degree, adapter):
-    """Give one-element scalar constants vector shapes accepted by the Host importer.
-
-    This is limited to TP4 P128 attention tensors consumed only as SPLIT axis
-    operands or broadcast MUL constants. The scalar bytes and quantization stay
-    unchanged. The compatibility form matches existing rank-local TFLites.
-    """
-    if degree != 4 or layer.profile not in ("P128", "D1") or component.name != "attn":
-        return []
-    return normalize_host_scalar_constant_shapes(model, graph, adapter.schema)
-
-
-def _mutate_int32_constant(model, graph, tensor_index, values, schema):
-    tensor = graph.tensors[tensor_index]
-    if int(tensor.type) != int(getattr(schema.TensorType, "INT32")):
-        raise ToolError("SHAPE_CONSTANT_DTYPE_UNSUPPORTED", "tensor {} is not INT32".format(tensor_index))
-    values = np.asarray(values, dtype="<i4").reshape(-1)
-    _replace_buffer_data(model, tensor, values.tobytes())
-
-
-def _apply_shape_constants(model, graph, model_info, component, adapter):
-    source_graph = model_info.graphs[0]
-    reshape_code = int(getattr(adapter.schema.BuiltinOperator, "RESHAPE"))
-    slice_code = int(getattr(adapter.schema.BuiltinOperator, "STRIDED_SLICE"))
-    pending_constant_edits = {}
-    for operator_index in component.operator_indices:
-        op = graph.operators[operator_index]
-        if int(op.opcodeIndex) < 0 or int(op.opcodeIndex) >= len(model.operatorCodes):
-            continue
-        code = model.operatorCodes[int(op.opcodeIndex)]
-        builtin = int(code.builtinCode)
-        placeholder = int(getattr(adapter.schema.BuiltinOperator, "PLACEHOLDER_FOR_GREATER_OP_CODES", -999))
-        if builtin == placeholder:
-            builtin = int(code.deprecatedBuiltinCode)
-        if builtin == reshape_code and len(op.outputs) == 1:
-            output_index = int(op.outputs[0])
-            target_shape = _shape(graph.tensors[output_index])
-            options = getattr(op, "builtinOptions", None)
-            if options is not None:
-                options.newShape = np.asarray(target_shape, dtype=np.int32)
-            if len(op.inputs) > 1 and int(op.inputs[1]) >= 0:
-                shape_tensor_index = int(op.inputs[1])
-                shape_tensor = graph.tensors[shape_tensor_index]
-                if _tensor_data(model, shape_tensor):
-                    previous = pending_constant_edits.get(shape_tensor_index)
-                    if previous is not None and tuple(previous) != tuple(target_shape):
-                        raise ToolError("SHARED_SHAPE_CONSTANT_CONFLICT", str(shape_tensor_index))
-                    pending_constant_edits[shape_tensor_index] = target_shape
-        elif builtin == slice_code and len(op.inputs) > 2 and int(op.inputs[2]) >= 0:
-            data_tensor_index = int(op.inputs[0])
-            end_tensor_index = int(op.inputs[2])
-            source_shape = source_graph.tensors[data_tensor_index].shape
-            target_shape = _shape(graph.tensors[data_tensor_index])
-            if len(source_shape) != len(target_shape):
-                raise ToolError("STRIDED_SLICE_RANK_CHANGED", str(operator_index))
-            end_tensor = graph.tensors[end_tensor_index]
-            raw = _tensor_data(model, end_tensor)
-            if len(raw) % 4:
-                raise ToolError("STRIDED_SLICE_END_CONSTANT_INVALID", str(end_tensor_index))
-            values = np.frombuffer(raw, dtype="<i4").copy()
-            if len(values) == len(source_shape):
-                for axis, (before, after) in enumerate(zip(source_shape, target_shape)):
-                    if before in (8, 32) and after < before and int(values[axis]) == before:
-                        values[axis] = after
-                pending_constant_edits[end_tensor_index] = tuple(int(value) for value in values)
-    for tensor_index, values in pending_constant_edits.items():
-        _mutate_int32_constant(model, graph, tensor_index, values, adapter.schema)
-
-
-def _adjust_attention_shapes(model, graph, layer, component, rank, degree):
-    touched = set(component.input_tensor_indices) | set(component.output_tensor_indices)
-    for operator_index in component.operator_indices:
-        op = graph.operators[operator_index]
-        touched.update(int(index) for index in op.inputs if int(index) >= 0)
-        touched.update(int(index) for index in op.outputs if int(index) >= 0)
-    for tensor_index in sorted(touched):
-        tensor = graph.tensors[tensor_index]
-        shape = list(_shape(tensor))
-        if len(shape) == 4:
-            # Attention tensors appear in both [batch, heads, seq, width] and
-            # [batch, seq, heads, width] layouts in the canonical export.
-            head_axes = [axis for axis in (1, 2) if shape[axis] in (8, 32)]
-            if len(head_axes) > 1:
-                raise ToolError(
-                    "ATTENTION_HEAD_AXIS_AMBIGUOUS",
-                    "tensor {} shape {} has multiple candidate head axes".format(tensor.name, tuple(shape)),
-                )
-            if head_axes:
-                axis = head_axes[0]
-                if shape[axis] % degree:
-                    raise ToolError(
-                        "ATTENTION_HEADS_NOT_DIVISIBLE",
-                        "tensor {} head dimension {} does not divide by {}".format(tensor.name, shape[axis], degree),
-                    )
-                shape[axis] //= degree
-                _set_shape(tensor, shape)
-    context_index = layer.roles["o"].activation_tensor_index
-    context = graph.tensors[context_index]
-    context_shape = list(_shape(context))
-    if not context_shape or context_shape[-1] != 4096:
-        raise ToolError("ATTENTION_CONTEXT_SHAPE_UNSUPPORTED", str(context_shape))
-    context_shape[-1] //= degree
-    _set_shape(context, context_shape)
-
-
-def _adjust_mlp_shapes(model, graph, component, degree):
-    touched = set(component.input_tensor_indices) | set(component.output_tensor_indices)
-    for operator_index in component.operator_indices:
-        op = graph.operators[operator_index]
-        touched.update(int(index) for index in op.inputs if int(index) >= 0)
-        touched.update(int(index) for index in op.outputs if int(index) >= 0)
-    for tensor_index in sorted(touched):
-        tensor = graph.tensors[tensor_index]
-        shape = list(_shape(tensor))
-        if shape and shape[-1] == 14336:
-            shape[-1] //= degree
-            _set_shape(tensor, shape)
-
-
-def _prune_model(model, graph, component):
-    for field_name in ("metadata", "metadataBuffer", "signatureDefs"):
-        value = getattr(model, field_name, None)
-        if value:
-            raise ToolError(
-                "MODEL_METADATA_REMAP_UNSUPPORTED",
-                "cannot safely prune model-level {} for a component graph".format(field_name),
-            )
-    selected = set(component.operator_indices)
-    tensors = graph.tensors
-    tensor_ids = sorted(
-        set(component.input_tensor_indices)
-        | set(component.output_tensor_indices)
-        | {
-            int(index)
-            for operator_index in selected
-            for index in list(graph.operators[operator_index].inputs) + list(graph.operators[operator_index].outputs)
-            if int(index) >= 0
-        }
-    )
-    remap = {old: new for new, old in enumerate(tensor_ids)}
-    selected_operators = [graph.operators[index] for index in component.operator_indices]
-    buffers = sorted({int(tensors[index].buffer) for index in tensor_ids} | {0})
-    buffer_remap = {old: new for new, old in enumerate(buffers)}
-    for tensor_index in tensor_ids:
-        tensors[tensor_index].buffer = buffer_remap[int(tensors[tensor_index].buffer)]
-    model.buffers = [model.buffers[index] for index in buffers]
-    graph.tensors = [tensors[index] for index in tensor_ids]
-    for op in selected_operators:
-        op.inputs = np.asarray([remap[int(index)] if int(index) >= 0 else -1 for index in op.inputs], dtype=np.int32)
-        op.outputs = np.asarray([remap[int(index)] for index in op.outputs], dtype=np.int32)
-    graph.operators = selected_operators
-    graph.inputs = np.asarray([remap[index] for index in component.input_tensor_indices], dtype=np.int32)
-    graph.outputs = np.asarray([remap[index] for index in component.output_tensor_indices], dtype=np.int32)
-    for field_name in ("metadata", "metadataBuffer", "signatureDefs"):
-        if hasattr(model, field_name):
-            setattr(model, field_name, None)
-    return remap
-
-
-def _io_contract(parsed_model, graph_index=0):
-    graph = parsed_model.graphs[graph_index]
-
-    def ports(indices):
-        return [
-            {
-                "index": index,
-                "name": graph.tensors[index].name,
-                "shape": list(graph.tensors[index].shape),
-                "dtype": graph.tensors[index].dtype,
-                "buffer_bytes": graph.tensors[index].buffer_bytes,
-            }
-            for index in indices
-        ]
-
-    return {"inputs": ports(graph.inputs), "outputs": ports(graph.outputs)}
-
-
-def _validate_serialized_component(data, source_name, schema_module):
-    parsed = read_tflite_bytes(data, source_name=source_name, schema_module=schema_module)
-    if parsed.version != 3 or len(parsed.graphs) != 1:
-        raise ToolError("SERIALIZED_COMPONENT_UNSUPPORTED", "expected TFLite v3 with one subgraph")
-    graph = parsed.graphs[0]
-    validate_graph(parsed, graph)
-    return parsed
-
-
-def _tp2_row_reduce_semantics(graph, layer):
-    """Describe the canonical row-reduce tensors without claiming a proof.
-
-    A TFLite graph records each projection's output tensor contract, but it
-    does not by itself define how rank-local accumulators are combined. Keep
-    the observed dtype, shape, and quantization metadata beside the explicit
-    unknowns so the release gate can require a separate bit-exact proof.
-    """
-    partial_outputs = {}
-    output_dtypes = {}
-    for role in ("o", "down"):
-        output_index = layer.roles[role].output_tensor_indices[0]
-        tensor = graph.tensors[output_index]
-        output_dtypes[role] = tensor.dtype
-        partial_outputs[role] = {
-            "tensor_index": tensor.index,
-            "tensor_name": tensor.name,
-            "dtype": tensor.dtype,
-            "shape": list(tensor.shape),
-            "quantization": quantization_dict(tensor.quantization),
-        }
-    observed = ", ".join(
-        "{}={}".format(role.upper(), output_dtypes[role])
-        for role in ("o", "down")
-    )
-    return {
-        "status": "UNPROVEN",
-        "proof_sha256": None,
-        "partial_output_dtype": output_dtypes,
-        "partial_outputs": partial_outputs,
-        "bias_ownership": {"o": "RANK0_ONLY", "down": "RANK0_ONLY"},
-        "accumulator_width": "UNPROVEN",
-        "reduction_order": "UNPROVEN",
-        "rounding_mode": "UNPROVEN",
-        "saturation": "UNPROVEN",
-        "requantization": "UNPROVEN",
-        "reason": (
-            "Canonical output metadata reports {}. It does not establish the "
-            "cross-rank accumulator width, reduction order, rounding, "
-            "saturation, and requantization needed for bit-exact TP2 row "
-            "reduction."
-        ).format(observed),
-    }
-
-
 def _build_tp_layer_into(
     model_object,
     model_info,
@@ -1247,10 +1338,12 @@ def _build_tp_layer_into(
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
     attention_context_head_padding_multiplier=None,
+    topology=None,
 ):
     """Write one layer's rank-specific components for TP2 or TP4."""
     if layer.graph_index != 0 or len(getattr(model_object, "subgraphs", ()) or ()) != 1:
         raise ToolError("SOURCE_GRAPH_UNSUPPORTED", "component rewriting requires exactly one source subgraph at index 0")
+    topology = resolve_topology(degree, topology)
     adapter = TFLiteObjectAdapter(schema_module=schema_module)
     if fc_width_padding_multiplier is not None:
         if int(fc_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
@@ -1258,38 +1351,30 @@ def _build_tp_layer_into(
                 "FC_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
                 "only multiplier {} passed the current Host regression".format(_VERIFIED_FC_WIDTH_PADDING_MULTIPLIER),
             )
-        if degree != 4 or layer.profile not in ("P128", "D1"):
+        if degree not in (4, 8) or profile_token_count(layer.profile) is None:
             raise ToolError(
                 "FC_WIDTH_PADDING_PROFILE_UNSUPPORTED",
-                "the verified width-padding rule applies only to TP4 P128 or D1",
+                "FC width padding requires TP4/TP8 and a fixed token profile",
             )
         fc_width_padding_multiplier = int(fc_width_padding_multiplier)
     if mlp_gate_dequant_width_padding_multiplier is not None:
         if int(mlp_gate_dequant_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-                "only multiplier 2 is supported; every new candidate SHA requires same-backend NPU retest",
+                "only multiplier {} has NPU evidence for the TP4 MLP Gate Dequant rule".format(
+                    _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER
+                ),
             )
-        if degree != 4 or layer.profile != "P128":
+        if degree not in (4, 8) or profile_token_count(layer.profile) is None:
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
-                "structural MLP Gate padding candidates are limited to TP4 P128; other profiles remain unsupported",
+                "MLP Gate Dequant requires TP4/TP8 and a fixed token profile",
             )
         mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
-    if attention_context_head_padding_multiplier is not None:
-        if int(attention_context_head_padding_multiplier) != 4:
-            raise ToolError(
-                "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
-                "only head-batch multiplier 4 passed the P128 Layer0 Host fixture",
-            )
-        if degree != 4 or layer.profile != "P128" or int(layer.layer_id) != 0:
-            raise ToolError(
-                "ATTENTION_CONTEXT_PADDING_SCOPE_UNVERIFIED",
-                "the experimental rule applies only to TP4 P128 Layer0",
-            )
-        attention_context_head_padding_multiplier = int(attention_context_head_padding_multiplier)
+    if attention_context_head_padding_multiplier is not None and (int(attention_context_head_padding_multiplier) != 4 or degree != 4 or layer.profile != "P128" or int(layer.layer_id) != 0):
+        raise ToolError("ATTENTION_CONTEXT_PADDING_SCOPE_UNVERIFIED", "experimental head padding requires TP4 P128 Layer0 and multiplier 4")
     specs = derive_tp_components(model_info, layer, graph_analysis, degree=degree)
-    weight_specs, weight_manifest = _prepare_projection_shards(model_object, layer, degree=degree, schema=adapter.schema)
+    weight_specs, weight_manifest = _prepare_projection_shards(model_object, layer, degree=degree, schema=adapter.schema, topology=topology)
     output_root = Path(output_directory)
     if output_root.exists():
         raise ToolError("OUTPUT_DIRECTORY_EXISTS", "refusing to reuse {}".format(output_root))
@@ -1305,10 +1390,10 @@ def _build_tp_layer_into(
                 if stage_name == component.name:
                     _apply_projection_shard(model, graph_object, layer, role, weight_specs[role], rank)
             if component.name == "attn":
-                _adjust_attention_shapes(model, graph_object, layer, component, rank, degree=degree)
+                _adjust_attention_shapes(model, graph_object, layer, component, rank, degree=degree, source_graph=graph)
             elif component.name == "mlp":
-                _adjust_mlp_shapes(model, graph_object, component, degree=degree)
-            _apply_shape_constants(model, graph_object, model_info, component, adapter)
+                _adjust_mlp_shapes(model, graph_object, layer, component, degree=degree)
+            _apply_shape_constants(model, graph_object, model_info, layer, component, adapter)
             _prune_model(model, graph_object, component)
             fc_width_padding = _apply_fc_width_padding_rule(
                 model,
@@ -1328,17 +1413,7 @@ def _build_tp_layer_into(
                 mlp_gate_dequant_width_padding_multiplier,
                 adapter,
             )
-            attention_context_head_padding = None
-            if component.name == "attn":
-                attention_context_head_padding = _apply_attention_context_head_padding(
-                    model,
-                    graph_object,
-                    layer,
-                    component,
-                    degree,
-                    attention_context_head_padding_multiplier,
-                    adapter,
-                )
+            attention_context_head_padding = _apply_attention_context_head_padding(model, graph_object, layer, component, degree, attention_context_head_padding_multiplier, adapter) if component.name == "attn" else None
             host_scalar_shape_compatibility = _normalize_host_scalar_constant_shapes(
                 model,
                 graph_object,
@@ -1422,39 +1497,61 @@ def _build_tp_layer_into(
         }
     manifest = {
         "schema": 1,
-        "stage": "M2_TP4_SINGLE_LAYER_STRUCTURAL_PARTITION" if degree == 4 else "M3_TP2_SINGLE_LAYER_STRUCTURAL_PARTITION",
-        "topology": "TP4_FOUR_STAGE_ALL_GATHER" if degree == 4 else "TP2_ROW_REDUCE",
+        "stage": "M3_TP2_SINGLE_LAYER_STRUCTURAL_PARTITION" if degree == 2 else "M2_TP{}_SINGLE_LAYER_STRUCTURAL_PARTITION".format(degree),
+        "topology": "TP2_ROW_REDUCE" if topology == "row-reduce" else "TP{}_FOUR_STAGE_ALL_GATHER".format(degree),
         "profile": layer.profile,
         "layer": layer.layer_id,
         "source": layer.source_name,
         "source_sha256": layer.source_sha256,
         "rank_order": list(range(degree)),
         "components": [component.to_dict() for component in specs],
-        "collective_contract": _collective_contract(degree, 128 if layer.profile == "P128" else 1),
+        "collective_contract": _collective_contract(
+            degree, profile_token_count(layer.profile), layer.roles["q"].shape[1], layer.roles["gate"].shape[0], layer.roles["q"].shape[0], topology
+        ),
         "weight_partitions": weight_manifest,
         "fc_width_padding_rule": {
-            "status": "APPLIED_TO_TP4_P128_D1_QKV" if fc_width_padding_multiplier is not None else "DISABLED",
+            "status": qkv_padding_status(degree, layer.profile, fc_width_padding_multiplier),
+            "profile": layer.profile,
+            "verified_profile": layer.profile in VERIFIED_QKV_PADDING_PROFILES,
             "multiplier": fc_width_padding_multiplier,
             "rule": "pad each rank-local Q/K/V output width with zero INT4 weights and zero bias, then SLICE back to the rank output width",
             "numerical_scope": "CPU_HOST_ONLY_NOT_AN_NPU_EXACTNESS_CLAIM",
         },
         "mlp_gate_dequant_width_padding_rule": {
-            "status": "APPLIED_TO_TP4_P128_MLP_GATE_STRUCTURAL_CANDIDATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
+            "status": (
+                "CANDIDATE_REWRITE_ENABLED"
+                if mlp_gate_dequant_width_padding_multiplier is not None
+                else "DISABLED"
+            ),
             "multiplier": mlp_gate_dequant_width_padding_multiplier,
-            "rule": "zero-pad rank-local Gate INT4 output width, Dequantize padded INT16 width, then Slice FP32 back to the rank width",
-            "numerical_scope": "STRUCTURAL_REWRITE_ONLY; each new candidate SHA requires a same-backend NPU retest",
-        },
-        "attention_context_head_padding_rule": {
-            "status": "APPLIED_TO_TP4_P128_LAYER0_MATMUL4" if attention_context_head_padding_multiplier is not None else "DISABLED",
-            "multiplier": attention_context_head_padding_multiplier,
-            "rule": "tile the two exact current-token attention MatMul4 operands to the Canonical 32-head batch shape, then slice the rank-local 8 heads back before the attention add",
-            "scope": "TP4 P128 Layer0 attention component only; expected_layers must be 1",
-            "numerical_scope": "HOST_FIXTURE_ONLY; every new model SHA requires same-backend NPU retest",
+            "rule": (
+                "zero-pad rank-local MLP Gate INT4 output channels, dequantize the padded INT16 tensor, "
+                "then slice the FP32 tensor back to the rank-local width"
+            ),
+            "verified_scope": {
+                "status": "NPU_EXACT_COMPONENT_REGRESSION",
+                "profile": "P128",
+                "layer": 0,
+                "ranks": [0, 1, 2, 3],
+                "fixtures": ["contract_stress_seed2401", "contract_stress_seed2402", "position37"],
+                "scope_limit": "MLP_COMPONENT_OUTPUT_ONLY; D1, other layers, full-layer and Full32 gates remain unverified",
+            },
+            "candidate_scope": {
+                "degree": degree,
+                "profile": layer.profile,
+                "layer": int(layer.layer_id),
+                "ranks": list(range(degree)),
+            },
+            "candidate_numerical_status": (
+                "NOT_RUN_REQUIRES_SHA_BOUND_NPU_GOLDEN"
+                if mlp_gate_dequant_width_padding_multiplier is not None
+                else "NOT_APPLICABLE"
+            ),
         },
         "host_scalar_shape_compatibility": {
-            "status": "NORMALIZED_SAFE_CONSTANT_SCALARS" if degree == 4 and layer.profile in ("P128", "D1") else "DISABLED",
+            "status": "NORMALIZED_SAFE_CONSTANT_SCALARS" if degree == 4 else "DISABLED",
             "rule": "one-element scalar INT16/INT32 constants consumed only as SPLIT axis operands or broadcast MUL values use shape [1] for Host importer compatibility",
-            "scope": "TP4_P128_D1_ATTENTION_COMPONENTS",
+            "scope": "TP4_FIXED_PROFILE_ATTENTION_COMPONENTS",
         },
         "quantization_contract": quantization_contract,
         "models": outputs,
@@ -1471,7 +1568,7 @@ def _build_tp_layer_into(
         "numerical_gate": golden_gate,
         "release_status": "NOT_ELIGIBLE",
     }
-    if degree == 2:
+    if topology == "row-reduce":
         graph_info = model_info.graphs[layer.graph_index]
         manifest["collective_contract"]["quantized_partial_semantics"] = _tp2_row_reduce_semantics(
             graph_info,
@@ -1493,12 +1590,13 @@ def _build_tp_layer(
     fc_width_padding_multiplier=None,
     mlp_gate_dequant_width_padding_multiplier=None,
     attention_context_head_padding_multiplier=None,
+    topology=None,
 ):
     output_root = Path(output_directory)
     if output_root.exists():
         raise ToolError("OUTPUT_DIRECTORY_EXISTS", "refusing to reuse {}".format(output_root))
     output_root.parent.mkdir(parents=True, exist_ok=True)
-    temporary_root = Path(tempfile.mkdtemp(prefix=".{}-build-".format(output_root.name), dir=str(output_root.parent)))
+    temporary_root = _create_staging_directory(output_root)
     staged_output = temporary_root / "artifact"
     try:
         manifest = _build_tp_layer_into(
@@ -1511,7 +1609,8 @@ def _build_tp_layer(
             schema_module=schema_module,
             fc_width_padding_multiplier=fc_width_padding_multiplier,
             mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier,
-            attention_context_head_padding_multiplier=attention_context_head_padding_multiplier,
+        attention_context_head_padding_multiplier=attention_context_head_padding_multiplier,
+            topology=topology,
         )
         os.replace(str(staged_output), str(output_root))
         return manifest
@@ -1546,7 +1645,7 @@ def build_tp4_layer(
 
 
 def build_tp2_layer(model_object, model_info, layer, graph_analysis, output_directory, schema_module=None):
-    """Build one TP2 structural candidate, gated on unproven row-reduce semantics."""
+    """Build one TP2 All-Gather structural candidate."""
     return _build_tp_layer(model_object, model_info, layer, graph_analysis, output_directory, degree=2, schema_module=schema_module)
 
 
@@ -1562,33 +1661,24 @@ def _build_tp_directory(
     mlp_gate_dequant_width_padding_multiplier=None,
     attention_context_head_padding_multiplier=None,
 ):
-    """Discover and build every layer for one profile as an atomic directory."""
+    """Discover and build every All-Gather layer for one profile as an atomic directory."""
+    topology = resolve_topology(degree)
     source_root = Path(source_directory)
     if not source_root.exists():
         raise ToolError("SOURCE_NOT_FOUND", "source path does not exist: {}".format(source_root))
-    if profile not in ("D1", "P128"):
-        raise ToolError("PROFILE_UNSUPPORTED", "profile must be D1 or P128")
+    if profile_token_count(profile) is None:
+        raise ToolError("PROFILE_UNSUPPORTED", "profile must encode a fixed token extent")
     if mlp_gate_dequant_width_padding_multiplier is not None:
         if int(mlp_gate_dequant_width_padding_multiplier) != _VERIFIED_FC_WIDTH_PADDING_MULTIPLIER:
-            raise ToolError("MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED", "only multiplier 2 is supported; every new candidate SHA requires same-backend NPU retest")
-        if degree != 4 or profile != "P128":
+            raise ToolError(
+                "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
+                "only multiplier {} has saved NPU evidence".format(_VERIFIED_FC_WIDTH_PADDING_MULTIPLIER),
+            )
+        if degree not in (4, 8) or profile_token_count(profile) is None:
             raise ToolError(
                 "MLP_GATE_WIDTH_PADDING_SCOPE_UNVERIFIED",
-                "structural MLP Gate padding candidates are limited to TP4 P128",
+                "MLP Gate Dequant requires TP4/TP8 and a fixed token profile",
             )
-        mlp_gate_dequant_width_padding_multiplier = int(mlp_gate_dequant_width_padding_multiplier)
-    if attention_context_head_padding_multiplier is not None:
-        if int(attention_context_head_padding_multiplier) != 4:
-            raise ToolError(
-                "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
-                "only head-batch multiplier 4 passed the P128 Layer0 Host fixture",
-            )
-        if degree != 4 or profile != "P128" or expected_layers != 1:
-            raise ToolError(
-                "ATTENTION_CONTEXT_PADDING_SCOPE_UNVERIFIED",
-                "the experimental rule applies only to TP4 P128 Layer0 with expected_layers=1",
-            )
-        attention_context_head_padding_multiplier = int(attention_context_head_padding_multiplier)
     if expected_layers <= 0:
         raise ToolError("EXPECTED_LAYER_COUNT_INVALID", "expected layer count must be positive")
     source_paths = [source_root] if source_root.is_file() else sorted(
@@ -1609,7 +1699,8 @@ def _build_tp_directory(
                 raise ToolError("SOURCE_NAME_DUPLICATE", source_name)
             entries.append((info, source_name))
             model_by_source[source_name] = (path, info)
-        report = discover_models(entries, expected_layers=expected_layers)
+        phase = "decode" if profile.startswith("D") else "prefill" if profile.startswith("P") else None
+        report = discover_models(entries, expected_layers=expected_layers, phase=phase)
     else:
         report = discovery_report
         if report.expected_layers != expected_layers:
@@ -1618,6 +1709,9 @@ def _build_tp_directory(
         for path in source_paths:
             source_name = path.name if source_root.is_file() else path.relative_to(source_root).as_posix()
             source = source_objects.get(source_name)
+            if source is not None and source.model_info is None and source.issues:
+                code, message = source.issues[0]
+                raise ToolError(code, message)
             if source is None or source.model_info is None:
                 raise ToolError("DISCOVERY_SOURCE_MAPPING_MISSING", source_name)
             model_by_source[source_name] = (path, source.model_info)
@@ -1659,7 +1753,7 @@ def _build_tp_directory(
     if output_root.exists():
         raise ToolError("OUTPUT_DIRECTORY_EXISTS", "refusing to reuse {}".format(output_root))
     output_root.parent.mkdir(parents=True, exist_ok=True)
-    temporary_root = Path(tempfile.mkdtemp(prefix=".{}-build-".format(output_root.name), dir=str(output_root.parent)))
+    temporary_root = _create_staging_directory(output_root)
     staged_output = temporary_root / "artifact"
     staged_output.mkdir()
     all_models = []
@@ -1696,16 +1790,15 @@ def _build_tp_directory(
                     layer_build_options["fc_width_padding_multiplier"] = fc_width_padding_multiplier
                 if (
                     mlp_gate_dequant_width_padding_multiplier is not None
-                    and degree == 4
-                    and profile == "P128"
+                    and degree in (4, 8)
                 ):
                     layer_build_options["mlp_gate_dequant_width_padding_multiplier"] = (
                         mlp_gate_dequant_width_padding_multiplier
                     )
                 if attention_context_head_padding_multiplier is not None:
-                    layer_build_options["attention_context_head_padding_multiplier"] = (
-                        attention_context_head_padding_multiplier
-                    )
+                    layer_build_options["attention_context_head_padding_multiplier"] = attention_context_head_padding_multiplier
+                if degree == 2:
+                    layer_build_options["topology"] = topology
                 layer_manifest = _build_tp_layer_into(
                     model_object,
                     info,
@@ -1720,13 +1813,20 @@ def _build_tp_directory(
                     if not source_layer.is_dir():
                         raise ToolError("COMPONENT_OUTPUT_MISSING", str(source_layer))
                     target_layer.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(str(source_layer), str(target_layer))
+                    for attempt in range(6):
+                        try:
+                            os.replace(str(source_layer), str(target_layer))
+                            break
+                        except PermissionError:
+                            if attempt == 5:
+                                raise
+                            time.sleep(0.5 * (attempt + 1))
                 manifest_path = staged_output / "manifests" / "{}_layer{:02d}.json".format(profile.lower(), layer.layer_id)
                 manifest_path.parent.mkdir(parents=True, exist_ok=True)
                 manifest_path.write_text(json.dumps(layer_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 manifest_relative = manifest_path.relative_to(staged_output).as_posix()
                 layer_manifest_hashes[manifest_relative] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-                if degree == 2:
+                if topology == "row-reduce":
                     row_reduce_semantics_by_layer[str(layer.layer_id)] = layer_manifest.get(
                         "collective_contract", {}
                     ).get(
@@ -1749,32 +1849,57 @@ def _build_tp_directory(
 
         aggregate = {
             "schema": 1,
-            "stage": "M2_TP4_FULL_PROFILE_STRUCTURAL_PARTITION" if degree == 4 else "M3_TP2_FULL_PROFILE_STRUCTURAL_PARTITION",
-            "topology": "TP4_FOUR_STAGE_ALL_GATHER" if degree == 4 else "TP2_ROW_REDUCE",
+            "stage": "M3_TP2_FULL_PROFILE_STRUCTURAL_PARTITION" if degree == 2 else "M2_TP{}_FULL_PROFILE_STRUCTURAL_PARTITION".format(degree),
+            "topology": "TP2_ROW_REDUCE" if topology == "row-reduce" else "TP{}_FOUR_STAGE_ALL_GATHER".format(degree),
             "profile": profile,
             "fc_width_padding_rule": {
-                "status": "APPLIED_TO_TP4_P128_D1_QKV" if fc_width_padding_multiplier is not None else "DISABLED",
+                "status": qkv_padding_status(degree, profile, fc_width_padding_multiplier),
+                "profile": profile,
+                "verified_profile": profile in VERIFIED_QKV_PADDING_PROFILES,
                 "multiplier": fc_width_padding_multiplier,
-                "scope": "only TP4 P128 or D1 attention Q/K/V output-channel-sharded FC operators",
+                "scope": "TP4/TP8 attention Q/K/V output-channel-sharded FC operators with validated fixed token shapes",
                 "numerical_scope": "CPU_HOST_ONLY_NOT_AN_NPU_EXACTNESS_CLAIM",
             },
             "mlp_gate_dequant_width_padding_rule": {
-                "status": "APPLIED_TO_TP4_P128_MLP_GATE_STRUCTURAL_CANDIDATE" if mlp_gate_dequant_width_padding_multiplier is not None else "DISABLED",
+                "status": (
+                    "CANDIDATE_REWRITE_ENABLED_UNVERIFIED_OUTSIDE_LAYER0"
+                    if mlp_gate_dequant_width_padding_multiplier is not None
+                    else "DISABLED"
+                ),
                 "multiplier": mlp_gate_dequant_width_padding_multiplier,
-                "scope": "TP4 P128 structurally eligible MLP Gate components; every new candidate SHA requires its own NPU retest",
-                "numerical_scope": "STRUCTURAL_REWRITE_ONLY; new model SHA requires same-backend NPU retest",
-            },
-            "attention_context_head_padding_rule": {
-                "status": "APPLIED_TO_TP4_P128_LAYER0_MATMUL4" if attention_context_head_padding_multiplier is not None else "DISABLED",
-                "multiplier": attention_context_head_padding_multiplier,
-                "scope": "TP4 P128 Layer0 attention component only; expected_layers=1",
-                "numerical_scope": "HOST_FIXTURE_ONLY; every new model SHA requires same-backend NPU retest",
+                "rule": (
+                    "zero-pad rank-local MLP Gate INT4 output channels, dequantize the padded INT16 tensor, "
+                    "then slice the FP32 tensor back to the rank-local width"
+                ),
+                "verified_scope": {
+                    "status": "NPU_EXACT_COMPONENT_REGRESSION",
+                    "profile": "P128",
+                    "layer": 0,
+                    "ranks": [0, 1, 2, 3],
+                    "fixtures": ["contract_stress_seed2401", "contract_stress_seed2402", "position37"],
+                    "scope_limit": "MLP_COMPONENT_OUTPUT_ONLY for TP4 P128 Layer0 Rank0-3; does not verify other layers, full-layer execution, or Full32",
+                },
+                "candidate_scope": {
+                    "degree": degree,
+                    "profile": profile,
+                    "layers": list(range(expected_layers)) if mlp_gate_dequant_width_padding_multiplier is not None else [],
+                    "ranks": list(range(degree)) if mlp_gate_dequant_width_padding_multiplier is not None else [],
+                    "structural_candidate_only": True,
+                },
+                "candidate_numerical_status": "NOT_VERIFIED_OUTSIDE_SAVED_LAYER0_SCOPE",
             },
             "expected_layers": expected_layers,
             "source_coverage": coverage,
             "source_audit": report.to_dict(include_quant_values=False),
             "rank_order": list(range(degree)),
-            "collective_contract": _collective_contract(degree, 128 if profile == "P128" else 1),
+            "collective_contract": _collective_contract(
+                degree,
+                profile_token_count(profile),
+                next(layer for source in report.sources for layer in source.layers if layer.profile == profile).roles["q"].shape[1],
+                next(layer for source in report.sources for layer in source.layers if layer.profile == profile).roles["gate"].shape[0],
+                next(layer for source in report.sources for layer in source.layers if layer.profile == profile).roles["q"].shape[0],
+                topology,
+            ),
             "layer_manifests": layer_manifests,
             "layer_manifest_sha256": layer_manifest_hashes,
             "models": all_models,
@@ -1805,7 +1930,7 @@ def _build_tp_directory(
             },
             "release_status": "NOT_ELIGIBLE",
         }
-        if degree == 2:
+        if topology == "row-reduce":
             aggregate["collective_contract"]["quantized_partial_semantics"] = {
                 "status": "UNPROVEN",
                 "proof_sha256": None,
@@ -1857,6 +1982,19 @@ def build_tp4_directory(
     )
 
 
+def build_tp8_directory(
+    source_directory, output_directory, profile="D1", expected_layers=32,
+    schema_module=None, discovery_report=None, fc_width_padding_multiplier=None,
+    mlp_gate_dequant_width_padding_multiplier=None,
+):
+    """Build a TP8 structural candidate; numerical validation is required."""
+    return _build_tp_directory(source_directory, output_directory, profile, expected_layers,
+                               degree=8, schema_module=schema_module,
+                               discovery_report=discovery_report,
+                               fc_width_padding_multiplier=fc_width_padding_multiplier,
+                               mlp_gate_dequant_width_padding_multiplier=mlp_gate_dequant_width_padding_multiplier)
+
+
 def build_tp2_directory(
     source_directory,
     output_directory,
@@ -1865,7 +2003,7 @@ def build_tp2_directory(
     schema_module=None,
     discovery_report=None,
 ):
-    """Build a TP2 candidate using input-channel O/Down and row-reduce contracts."""
+    """Build a TP2 candidate using output-channel shards and All-Gather contracts."""
     return _build_tp_directory(
         source_directory,
         output_directory,

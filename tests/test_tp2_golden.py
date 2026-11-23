@@ -1,5 +1,4 @@
 import hashlib
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,8 +7,6 @@ import sys
 
 import numpy as np
 
-SRC_PATH = Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SRC_PATH))
 
 from tflite_tp.golden import (
     _tp2_partial_range_diagnostic,
@@ -25,6 +22,7 @@ from tflite_tp.model import (
     SourceDiscovery,
     TensorInfo,
 )
+from tflite_tp_testdata import WorkspaceTemporaryDirectory as TemporaryDirectory
 
 
 def _tensor(index, name, shape, dtype="INT16", scale=1.0):
@@ -135,7 +133,7 @@ class TP2GoldenTests(unittest.TestCase):
         self.assertEqual(int(reduced[0, 0, 0]), np.iinfo(np.int16).max)
 
     def test_profile_runner_executes_each_rank_and_marks_partial_scope_incomplete(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with TemporaryDirectory() as temporary:
             root = Path(temporary)
             source_path = root / "layer00.tflite"
             source_path.write_bytes(b"canonical")
@@ -281,7 +279,7 @@ class TP2GoldenTests(unittest.TestCase):
             self.assertEqual(runner.inputs_by_model["o-r1"]["o_input"].tolist(), [[[12, 13]]])
 
     def test_finalizer_keeps_zero_mismatch_partial_probe_incomplete(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with TemporaryDirectory() as temporary:
             manifest = {
                 "collective_contract": {"quantized_partial_semantics": {"status": "UNPROVEN"}},
                 "models": [],
@@ -308,7 +306,7 @@ class TP2GoldenTests(unittest.TestCase):
             self.assertTrue((Path(temporary) / "TP2_ROW_REDUCE_GOLDEN.json").is_file())
 
     def test_finalizer_blocks_nonzero_mismatch_and_does_not_auto_repair(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with TemporaryDirectory() as temporary:
             manifest = {
                 "collective_contract": {"quantized_partial_semantics": {"status": "UNPROVEN"}},
                 "models": [],

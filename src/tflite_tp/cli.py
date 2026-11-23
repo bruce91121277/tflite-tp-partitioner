@@ -7,17 +7,23 @@ from .discovery import discover_path
 from .errors import ToolError
 from .npu_canary import comparator_self_test, compare_canary_outputs, prepare_fc_canary
 from .pipeline import run_pipeline
-from .tflite_rewriter import build_tp2_directory, build_tp4_directory
+from .tflite_rewriter import build_tp2_directory, build_tp4_directory, build_tp8_directory
+from .tail import build_tail_tp4, compare_tail_logits
+from .capabilities import inspect_llama_source
+from .model import profile_token_count
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="tflite-tp",
-        description="Audit Canonical Llama 3.1 8B W4A16 TFLite graphs and discover layer projections.",
+        description="Inspect and build fixed-token Llama TP2, TP4, and TP8 component candidates.",
     )
-    parser.add_argument("--prefill", help="canonical P128 TFLite file or directory")
-    parser.add_argument("--decode", help="canonical D1 TFLite file or directory")
-    parser.add_argument("--tp", choices=("2", "4", "all"), help="tensor parallel degree")
+    parser.add_argument("--prefill", help="Prefill TFLite file or directory")
+    parser.add_argument("--decode", help="Decode TFLite file or directory")
+    parser.add_argument("--tp", choices=("2", "4", "8", "all"), help="tensor parallel degree; all builds TP2/4/8")
+    parser.add_argument("--prefill-tokens", type=int, default=128, help="fixed Prefill input token count")
+    parser.add_argument("--decode-tokens", type=int, default=1, help="fixed Decode input token count")
+    parser.add_argument("--expected-layers", type=int, default=32, help="expected Transformer layer count")
     parser.add_argument("--quant", default="w4a16", help="quantization profile (only w4a16 is supported)")
     parser.add_argument("--strict-bitexact", action="store_true", help="require exact numerical equality before release")
     parser.add_argument("--auto-repair", action="store_true", help="enable bounded canonical rebuilds for diagnosed mismatches")
@@ -33,9 +39,28 @@ def build_parser():
     parser.add_argument(
         "--mlp-gate-dequant-width-padding-multiplier",
         type=int,
-        help="TP4 P128 MLP Gate structural candidate rewrite: 2 enables it; each candidate SHA requires NPU retest; 0 disables it",
+        help=(
+            "opt-in TP4 MLP Gate rewrite: 2 pads the rank-local INT4 FC before Dequantize; "
+            "only applied to P128 Layer0 (the verified scope); other profiles/layers remain unmodified; 0 disables"
+        ),
     )
     subparsers = parser.add_subparsers(dest="command")
+    inspect_llama = subparsers.add_parser("inspect-llama", help="inspect Llama source geometry and eligible TP degrees")
+    inspect_llama.add_argument("--prefill", required=True, help="single-layer Prefill TFLite source")
+    inspect_llama.add_argument("--decode", required=True, help="single-layer Decode TFLite source")
+    inspect_llama.add_argument("--prefill-tokens", type=int, required=True)
+    inspect_llama.add_argument("--decode-tokens", type=int, required=True)
+    generic_tail = subparsers.add_parser("build-tail", help="build TP2, TP4, or TP8 rank-local tail models")
+    generic_tail.add_argument("--source", required=True)
+    generic_tail.add_argument("--output", required=True)
+    generic_tail.add_argument("--tp", type=int, choices=(2, 4, 8), required=True)
+    generic_tail.add_argument("--input-scale", type=float, help="set the symmetric INT16 external tail input scale")
+    compare_generic_tail = subparsers.add_parser("compare-tail", help="compare rank logits against a golden tensor")
+    compare_generic_tail.add_argument("--golden", required=True)
+    compare_generic_tail.add_argument("--ranks", nargs="+", required=True)
+    for compare in (compare_generic_tail,):
+        compare.add_argument("--golden-input", required=True, help="input bytes used to produce the golden logits")
+        compare.add_argument("--candidate-input", required=True, help="input bytes used to produce the rank logits")
     discover = subparsers.add_parser("discover", help="scan one TFLite file or a directory of source graphs")
     discover.add_argument("--source", required=True, help="Canonical .tflite file or directory")
     discover.add_argument("--expected-layers", type=int, default=32)
@@ -46,34 +71,36 @@ def build_parser():
         help="include full per-tensor scale/zero-point/min/max arrays in the report",
     )
     for command_name, help_text in (
-        ("build-tp2", "build TP2 input-channel and row-reduce component candidates"),
+        ("build-tp2", "build TP2 All-Gather component candidates"),
         ("build-tp4", "build TP4 output-channel and all-gather component candidates"),
+        ("build-tp8", "build TP8 output-channel component candidates"),
     ):
         build = subparsers.add_parser(command_name, help=help_text)
         build.add_argument("--source", required=True, help="directory of canonical per-layer TFLite sources, or one layer file")
         build.add_argument("--output", required=True, help="new output directory; existing directories are never reused")
-        build.add_argument(
-            "--profile",
-            choices=(("auto", "D1", "P128") if command_name == "build-tp4" else ("D1", "P128")),
-            default=("auto" if command_name == "build-tp4" else "D1"),
-        )
+        build.add_argument("--profile", default=("auto" if command_name == "build-tp4" else "D1"),
+                           help="auto or one fixed-token profile: P<n> for Prefill, D<n> for Decode")
         build.add_argument("--expected-layers", type=int, default=32)
-        if command_name == "build-tp4":
+        if command_name in ("build-tp4", "build-tp8"):
             build.add_argument(
                 "--fc-width-padding-multiplier",
                 type=int,
-                help="TP4 Q/K/V width padding: default 2 applies the Host-verified rule; 0 disables it for diagnostics",
+                help=(
+                    "TP4/TP8 Q/K/V width padding: defaults to 2 for P128/D1 candidates; "
+                    "TP8 remains a numerical candidate; 0 disables padding"
+                ),
             )
+        if command_name in ("build-tp4", "build-tp8"):
             build.add_argument(
                 "--mlp-gate-dequant-width-padding-multiplier",
                 type=int,
-                help="P128 MLP Gate width padding candidate: 2 enables it; each candidate SHA requires NPU retest; 0 disables it",
+                help=(
+                    "opt-in MLP Gate Dequant width rewrite; 2 enables TP4 P128 or experimental TP8 "
+                    "P128/D1 candidates, 0 disables it"
+                ),
             )
-            build.add_argument(
-                "--attention-context-head-padding-multiplier",
-                type=int,
-                help="experimental P128 Layer0 MatMul4 head-batch rewrite: 4 enables it; each emitted SHA needs Host and NPU retest",
-            )
+        if command_name == "build-tp4":
+            build.add_argument("--attention-context-head-padding-multiplier", type=int, help="experimental TP4 P128 Layer0 rewrite")
     prepare_canary = subparsers.add_parser(
         "prepare-npu-canary",
         help="package canonical, unpadded rank-local, and padded rank-local FC tap models",
@@ -100,12 +127,27 @@ def build_parser():
         compare_canary.add_argument("--{}-capture-json".format(label), required=True)
     compare_canary.add_argument("--report", required=True)
     subparsers.add_parser("canary-self-test", help="test exact comparator and mismatch localization")
+
     return parser
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "inspect-llama":
+        try:
+            prefill = inspect_llama_source(args.prefill, args.prefill_tokens)
+            decode = inspect_llama_source(args.decode, args.decode_tokens)
+            fields = ("hidden_size", "intermediate_size", "query_heads", "kv_heads", "head_dim")
+            if any(prefill[field] != decode[field] for field in fields):
+                raise ToolError("SOURCE_GEOMETRY_MISMATCH", "Prefill and Decode block geometries differ")
+            result = {"status": "GEOMETRY_ONLY", "prefill": prefill, "decode": decode,
+                      "eligible_tp_degrees": sorted(set(prefill["eligible_tp_degrees"]) & set(decode["eligible_tp_degrees"]))}
+        except (ToolError, OSError) as exc:
+            print(json.dumps({"status": "INSPECTION_FAILED", "error": str(exc)}, indent=2))
+            return 2
+        print(json.dumps(result, indent=2))
+        return 0
     if args.command == "prepare-npu-canary":
         try:
             manifest = prepare_fc_canary(
@@ -165,18 +207,44 @@ def main(argv=None):
         result = comparator_self_test()
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["status"] == "PASS" else 1
-    if args.command in ("build-tp2", "build-tp4"):
-        builder = build_tp2_directory if args.command == "build-tp2" else build_tp4_directory
+    if args.command == "compare-tail":
+        try:
+            result = compare_tail_logits(args.golden, args.ranks, args.golden_input, args.candidate_input)
+        except (ToolError, OSError) as exc:
+            print(json.dumps({"status": "ERROR", "error": str(exc)}, indent=2))
+            return 2
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] == "PASS" else 1
+    if args.command == "build-tail":
+        try:
+            result = build_tail_tp4(
+                args.source, args.output,
+                degree=args.tp,
+                input_scale=args.input_scale,
+            )
+        except (ToolError, OSError) as exc:
+            print(json.dumps({"structural_status": "STRUCTURAL_FAIL", "error": str(exc),
+                              "release_status": "NOT_ELIGIBLE"}, indent=2))
+            return 2
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.command == "build-tp4" and args.attention_context_head_padding_multiplier not in (None, 0, 4):
+        print(json.dumps({"error": "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED"}))
+        return 2
+    if args.command in ("build-tp2", "build-tp4", "build-tp8"):
+        builder = {"build-tp2": build_tp2_directory, "build-tp4": build_tp4_directory, "build-tp8": build_tp8_directory}[args.command]
         try:
             profile = args.profile
-            discovery_report = None
-            if args.command == "build-tp4" and profile == "auto":
-                discovery_report = discover_path(args.source, expected_layers=args.expected_layers)
+            phase = "decode" if profile.startswith("D") else "prefill" if profile.startswith("P") else None
+            discovery_report = discover_path(
+                args.source, expected_layers=args.expected_layers, phase=phase
+            )
+            if profile == "auto":
                 detected = sorted({
                     layer.profile
                     for source in discovery_report.sources
                     for layer in source.layers
-                    if layer.profile in ("D1", "P128")
+                    if profile_token_count(layer.profile) is not None
                 })
                 if len(detected) != 1:
                     raise ToolError(
@@ -188,33 +256,21 @@ def main(argv=None):
                 "profile": profile,
                 "expected_layers": args.expected_layers,
             }
-            if args.command == "build-tp4":
-                multiplier = args.fc_width_padding_multiplier
-                if multiplier is None:
-                    multiplier = 2
-                if multiplier not in (0, 2):
-                    raise ToolError(
-                        "FC_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-                        "only 2 (verified) or 0 (explicitly disabled for diagnostics) is accepted",
-                    )
-                build_args["fc_width_padding_multiplier"] = multiplier or None
+            build_args["discovery_report"] = discovery_report
+            degree = {"build-tp2": 2, "build-tp4": 4, "build-tp8": 8}[args.command]
+            if args.command in ("build-tp4", "build-tp8"):
+                from .planning import resolve_qkv_padding
+                multiplier, _decision = resolve_qkv_padding(degree, profile, args.fc_width_padding_multiplier)
+                build_args["fc_width_padding_multiplier"] = multiplier
                 mlp_multiplier = args.mlp_gate_dequant_width_padding_multiplier
-                if mlp_multiplier is None and profile == "P128":
-                    mlp_multiplier = 2
                 if mlp_multiplier not in (None, 0, 2):
                     raise ToolError(
                         "MLP_GATE_WIDTH_PADDING_MULTIPLIER_UNVERIFIED",
-                        "only multiplier 2 or explicit disable 0 is supported",
+                        "only 2 (candidate rewrite) or 0 (disabled) is accepted",
                     )
                 build_args["mlp_gate_dequant_width_padding_multiplier"] = mlp_multiplier or None
-                attention_multiplier = args.attention_context_head_padding_multiplier
-                if attention_multiplier not in (None, 0, 4):
-                    raise ToolError(
-                        "ATTENTION_CONTEXT_PADDING_MULTIPLIER_UNVERIFIED",
-                        "only multiplier 4 or explicit disable 0 is supported",
-                    )
-                build_args["attention_context_head_padding_multiplier"] = attention_multiplier or None
-                build_args["discovery_report"] = discovery_report
+            if args.command == "build-tp4" and args.attention_context_head_padding_multiplier:
+                build_args["attention_context_head_padding_multiplier"] = args.attention_context_head_padding_multiplier
             manifest = builder(args.source, args.output, **build_args)
         except ToolError as exc:
             print(json.dumps({
@@ -237,8 +293,6 @@ def main(argv=None):
             "source_coverage": manifest.get("source_coverage"),
             "mismatch_count": manifest.get("mismatch_count"),
             "auto_repair_report": manifest.get("auto_repair_report"),
-            "mlp_gate_dequant_width_padding_rule": manifest.get("mlp_gate_dequant_width_padding_rule"),
-            "attention_context_head_padding_rule": manifest.get("attention_context_head_padding_rule"),
             "output": args.output,
         }, indent=2, sort_keys=True))
         return 0
@@ -246,14 +300,12 @@ def main(argv=None):
         if not args.prefill or not args.decode or not args.tp or not args.output:
             parser.error("top-level execution requires --prefill, --decode, --tp, and --output")
         padding_multiplier = args.fc_width_padding_multiplier
-        if padding_multiplier is None and args.tp in ("4", "all"):
+        if padding_multiplier is None and args.tp in ("4", "8", "all"):
             padding_multiplier = 2
         if padding_multiplier not in (None, 0, 2):
             parser.error("--fc-width-padding-multiplier accepts only 2 or 0")
-        mlp_multiplier = args.mlp_gate_dequant_width_padding_multiplier
-        if mlp_multiplier is None and args.tp in ("4", "all"):
-            mlp_multiplier = 2
-        if mlp_multiplier not in (None, 0, 2):
+        mlp_padding_multiplier = args.mlp_gate_dequant_width_padding_multiplier
+        if mlp_padding_multiplier not in (None, 0, 2):
             parser.error("--mlp-gate-dequant-width-padding-multiplier accepts only 2 or 0")
         try:
             manifest = run_pipeline(
@@ -267,8 +319,11 @@ def main(argv=None):
                 max_repairs=args.max_repairs,
                 dry_run=args.dry_run,
                 resume=args.resume,
+                expected_layers=args.expected_layers,
                 fc_width_padding_multiplier=padding_multiplier,
-                mlp_gate_dequant_width_padding_multiplier=mlp_multiplier,
+                mlp_gate_dequant_width_padding_multiplier=mlp_padding_multiplier,
+                prefill_tokens=args.prefill_tokens,
+                decode_tokens=args.decode_tokens,
             )
         except ToolError as exc:
             print(json.dumps({

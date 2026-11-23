@@ -1,6 +1,6 @@
 # Engineering handoff
 
-This repository partitions supported W4A16 per-layer TFLite graphs into TP2 and TP4 components. It does not include model files, the vendor compiler, runtime libraries, or device captures. The project is experimental; see [known limitations](known-limitations.md).
+This repository partitions supported W4A16 per-layer TFLite graphs into TP2 and TP4 components. It does not include model files, the vendor compiler, runtime libraries, or device captures. The project is experimental; see the [README](../README.md).
 
 ## Code map
 
@@ -26,4 +26,4 @@ See the [README](../README.md) for partitioning commands and source requirements
 
 Structural, compiler, host, device and distributed checks cover different behavior. Record the model and artifact hashes, profile, input and cache provenance, toolchain, device, and scope for each result. A compiler or unit-test pass does not establish full-model behavior.
 
-Priority work includes extending graph support and TP degrees, batch DLA production, full-layer device execution, and distributed generation. See [roadmap](roadmap.md) and [verification guidance](numerical-verification.md). Historical fixture-specific results are documented separately; model files and private captures are not included.
+Priority work includes extending graph support and TP degrees, supporting more model geometries and source profiles. See [roadmap](roadmap.md) and [verification guidance](verification.md). Model files and private captures are not included.

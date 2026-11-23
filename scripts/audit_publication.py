@@ -1,6 +1,7 @@
 """Audit working files or the Git index for private artifacts and sensitive text."""
 
 import argparse
+from datetime import date
 import hashlib
 import json
 import re
@@ -99,7 +100,7 @@ def main():
 
     report = {
         "audit": "public-source-safety-scan-v1",
-        "scan_date": "2026-10-27",
+        "scan_date": date.today().isoformat(),
         "scan_scope": "git_index_staged" if args.staged else "working_tree",
         "result": "PASS" if not prohibited_files and not content_findings else "FAIL",
         "files_checked": len(checked),

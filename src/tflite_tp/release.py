@@ -21,6 +21,21 @@ _REQUIRED_GOLDEN_STAGES = (
     "KV_OUTPUT",
 )
 
+# The profile Golden implementation currently executes source and candidate
+# graphs through this MTK interpreter. Keep the allowlist explicit so an
+# unknown or synthetic runner identity cannot be promoted by the release gate.
+_VERIFIED_GOLDEN_BACKENDS = frozenset({
+    "mtk_converter.python.tools.tflite_executor.TFLiteExecutor",
+})
+
+
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
 
 def golden_fixture_identity_failure(report, expected_layers):
     """Require one valid deterministic fixture SHA for every covered layer."""
@@ -66,17 +81,67 @@ def _validate_golden_report(root, manifest, expected_sources, degree, components
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return "GOLDEN_REPORT_INVALID"
-    if report.get("numerical_status") != "NUMERICAL_PASS" or report.get("mismatch_count") != 0:
+    if report.get("profile") != manifest.get("profile"):
+        return "GOLDEN_PROFILE_MISMATCH"
+    if report.get("topology") != manifest.get("topology"):
+        return "GOLDEN_TOPOLOGY_MISMATCH"
+    if report.get("backend") not in _VERIFIED_GOLDEN_BACKENDS:
+        return "GOLDEN_BACKEND_UNVERIFIED"
+    if report.get("simulate_fp16") is not False:
+        return "GOLDEN_EXECUTION_MODE_UNVERIFIED"
+    total_mismatches = report.get("mismatch_count")
+    if (
+        report.get("numerical_status") != "NUMERICAL_PASS"
+        or isinstance(total_mismatches, bool)
+        or not isinstance(total_mismatches, int)
+        or total_mismatches != 0
+        or report.get("mismatches") != []
+    ):
         return "GOLDEN_REPORT_NOT_ZERO_MISMATCH"
     if report.get("source_sha256_by_name") != expected_sources:
         return "GOLDEN_SOURCE_MAPPING_MISMATCH"
-    expected_layers = int(manifest.get("expected_layers", 0))
+    candidate_sha256 = report.get("candidate_sha256")
+    if not isinstance(candidate_sha256, dict):
+        return "GOLDEN_CANDIDATE_SHA_MISSING"
+    expected_candidate_sha256 = {}
+    for row in manifest.get("models", []):
+        if row.get("profile") != manifest.get("profile"):
+            continue
+        path = row.get("path")
+        digest = row.get("output_sha256")
+        if not isinstance(path, str) or not path or not _is_sha256(digest):
+            return "GOLDEN_CANDIDATE_SHA_INVALID"
+        if path in expected_candidate_sha256:
+            return "GOLDEN_CANDIDATE_SHA_MAPPING_INVALID"
+        expected_candidate_sha256[path] = digest.lower()
+    if any(not isinstance(path, str) or not path or not _is_sha256(digest)
+           for path, digest in candidate_sha256.items()):
+        return "GOLDEN_CANDIDATE_SHA_INVALID"
+    normalized_candidate_sha256 = {
+        path: digest.lower() for path, digest in candidate_sha256.items()
+    }
+    if set(normalized_candidate_sha256) != set(expected_candidate_sha256):
+        return "GOLDEN_CANDIDATE_SHA_COVERAGE_INCOMPLETE"
+    if normalized_candidate_sha256 != expected_candidate_sha256:
+        return "GOLDEN_CANDIDATE_SHA_MAPPING_MISMATCH"
+    try:
+        expected_layers = int(manifest.get("expected_layers", 0))
+        degree = int(degree)
+    except (TypeError, ValueError):
+        return "GOLDEN_COVERAGE_INCOMPLETE"
+    if expected_layers < 1 or degree < 1:
+        return "GOLDEN_COVERAGE_INCOMPLETE"
     fixture_failure = golden_fixture_identity_failure(report, expected_layers)
     if fixture_failure:
         return fixture_failure
-    required_stages = set(report.get("required_stages", []))
-    if required_stages != set(_REQUIRED_GOLDEN_STAGES):
+    required_stages_value = report.get("required_stages")
+    if not isinstance(required_stages_value, (list, tuple)):
         return "GOLDEN_STAGE_COVERAGE_MISSING"
+    if any(not isinstance(stage, str) for stage in required_stages_value):
+        return "GOLDEN_STAGE_COVERAGE_MISSING"
+    if tuple(required_stages_value) != _REQUIRED_GOLDEN_STAGES:
+        return "GOLDEN_STAGE_COVERAGE_MISSING"
+    required_stages = set(required_stages_value)
     expected_rows = {
         (layer, rank, stage)
         for layer in range(expected_layers)
@@ -84,14 +149,107 @@ def _validate_golden_report(root, manifest, expected_sources, degree, components
         for stage in required_stages
     }
     observed = set()
-    for row in report.get("boundary_results", []):
-        key = (row.get("layer"), row.get("rank"), row.get("stage"))
-        if row.get("mismatch_count") != 0 or key in observed:
+    boundary_results = report.get("boundary_results")
+    if not isinstance(boundary_results, list):
+        return "GOLDEN_BOUNDARY_COVERAGE_INCOMPLETE"
+    for row in boundary_results:
+        if not isinstance(row, dict):
+            return "GOLDEN_BOUNDARY_COVERAGE_INCOMPLETE"
+        layer = row.get("layer")
+        rank = row.get("rank")
+        stage = row.get("stage")
+        if not isinstance(layer, int) or not isinstance(rank, int) or not isinstance(stage, str):
+            return "GOLDEN_BOUNDARY_COVERAGE_INCOMPLETE"
+        key = (layer, rank, stage)
+        row_mismatches = row.get("mismatch_count")
+        if (
+            isinstance(row_mismatches, bool)
+            or not isinstance(row_mismatches, int)
+            or row_mismatches != 0
+            or key in observed
+        ):
             return "GOLDEN_BOUNDARY_MISMATCH_OR_DUPLICATE"
+        row_max = row.get("max_absolute_difference")
+        if isinstance(row_max, bool) or not isinstance(row_max, (int, float)) or row_max != 0:
+            return "GOLDEN_BOUNDARY_NOT_BITEXACT"
+        if row.get("comparison_method") != "BITWISE_ELEMENTWISE":
+            return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+        checks = row.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+        check_element_total = 0
+        check_mismatch_total = 0
+        for check in checks:
+            if not isinstance(check, dict):
+                return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+            elements = check.get("compared_elements")
+            if isinstance(elements, bool) or not isinstance(elements, int) or elements <= 0:
+                return "GOLDEN_BOUNDARY_ELEMENT_COUNT_INVALID"
+            expected_shape = check.get("expected_compared_shape")
+            actual_shape = check.get("actual_shape")
+            if (
+                not isinstance(expected_shape, list)
+                or not isinstance(actual_shape, list)
+                or expected_shape != actual_shape
+                or any(isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in expected_shape)
+            ):
+                return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+            shape_elements = 1
+            for dimension in expected_shape:
+                shape_elements *= dimension
+            if shape_elements != elements or shape_elements <= 0:
+                return "GOLDEN_BOUNDARY_ELEMENT_COUNT_INVALID"
+            dtype = check.get("dtype")
+            if (
+                not isinstance(dtype, str)
+                or not dtype
+                or check.get("expected_dtype") != dtype
+                or check.get("actual_dtype") != dtype
+            ):
+                return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+            if check.get("comparison_method") != "BITWISE_ELEMENTWISE":
+                return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+            expected_hash = check.get("expected_sha256")
+            actual_hash = check.get("actual_sha256")
+            if (
+                not isinstance(expected_hash, str)
+                or not isinstance(actual_hash, str)
+                or len(expected_hash) != 64
+                or len(actual_hash) != 64
+                or any(char not in "0123456789abcdefABCDEF" for char in expected_hash + actual_hash)
+            ):
+                return "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"
+            if expected_hash.lower() != actual_hash.lower():
+                return "GOLDEN_BOUNDARY_HASH_MISMATCH"
+            check_mismatches = check.get("mismatch_count")
+            check_max = check.get("max_absolute_difference")
+            check_rows = check.get("mismatches")
+            if (
+                isinstance(check_mismatches, bool)
+                or not isinstance(check_mismatches, int)
+                or check_mismatches != 0
+                or isinstance(check_max, bool)
+                or not isinstance(check_max, (int, float))
+                or check_max != 0
+                or check_rows != []
+            ):
+                return "GOLDEN_BOUNDARY_NOT_BITEXACT"
+            check_element_total += elements
+            check_mismatch_total += check_mismatches
+        row_elements = row.get("compared_elements")
+        if (
+            isinstance(row_elements, bool)
+            or not isinstance(row_elements, int)
+            or row_elements != check_element_total
+            or row_mismatches != check_mismatch_total
+        ):
+            return "GOLDEN_BOUNDARY_ELEMENT_COUNT_INVALID"
         observed.add(key)
     if observed != expected_rows:
         return "GOLDEN_BOUNDARY_COVERAGE_INCOMPLETE"
     coverage = report.get("golden_coverage", {})
+    if not isinstance(coverage, dict):
+        return "GOLDEN_COVERAGE_INCOMPLETE"
     if coverage.get("complete") is not True or coverage.get("layers") != list(range(expected_layers)):
         return "GOLDEN_COVERAGE_INCOMPLETE"
     if coverage.get("ranks") != list(range(degree)) or coverage.get("components") != list(components):
@@ -152,7 +310,8 @@ def evaluate_release(candidate_sets):
         if not rows:
             failures.append(("MODEL_MANIFEST_MISSING", label))
         topology = manifest.get("topology")
-        degree = 2 if topology == "TP2_ROW_REDUCE" else 4 if topology == "TP4_FOUR_STAGE_ALL_GATHER" else None
+        degree = {"TP2_ROW_REDUCE": 2, "TP2_FOUR_STAGE_ALL_GATHER": 2,
+                  "TP4_FOUR_STAGE_ALL_GATHER": 4, "TP8_FOUR_STAGE_ALL_GATHER": 8}.get(topology)
         components = ("attn", "o", "suffix_attn", "mlp", "down", "suffix_final")
         if degree is None:
             failures.append(("TOPOLOGY_CONTRACT_UNSUPPORTED", label))
@@ -178,11 +337,11 @@ def evaluate_release(candidate_sets):
             contract = manifest.get("collective_contract", {})
             if contract.get("kv_cache_policy") != "RANK_LOCAL":
                 failures.append(("KV_CACHE_COLLECTIVE_POLICY_INVALID", label))
-            if degree == 4:
+            if topology != "TP2_ROW_REDUCE":
                 stages = [item.get("stage") for item in contract.get("all_gather_boundaries", [])]
                 if stages != ["AG0", "AG1", "AG2", "AG3"] or contract.get("row_reduce_boundaries") != []:
                     failures.append(("TP4_COLLECTIVE_CONTRACT_INVALID", label))
-            if degree == 2:
+            if topology == "TP2_ROW_REDUCE":
                 boundaries = contract.get("row_reduce_boundaries", [])
                 if (
                     [item.get("name") for item in boundaries] != ["O", "Down"]

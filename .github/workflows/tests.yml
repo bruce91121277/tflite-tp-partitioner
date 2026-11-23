@@ -25,3 +25,5 @@ jobs:
           tflite-tp-verify --help
       - name: Synthetic unit tests
         run: python -m unittest discover -s tests -v
+      - name: Audit public content
+        run: python scripts/audit_publication.py --staged --output /tmp/publication_scan.json

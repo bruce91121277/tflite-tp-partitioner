@@ -1,5 +1,5 @@
 import hashlib
-import tempfile
+import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from tflite_tp_testdata import WorkspaceTemporaryDirectory as TemporaryDirectory
 
 from tflite_tp.cli import build_parser
 from tflite_tp.discovery import discover_models
@@ -19,6 +20,8 @@ from tflite_tp.diagnostics import (
 )
 from tflite_tp.errors import ToolError
 from tflite_tp.golden import (
+    _TP4_GOLDEN_STAGES,
+    _TP4_LAYER_COMPONENTS,
     MTKConverterTFLiteRunner,
     _tp4_attention_intermediate_inputs,
     _tp4_candidate_attention_input_overrides,
@@ -40,11 +43,71 @@ from tflite_tp.partition import derive_tp4_components
 from tflite_tp.release import _validate_golden_report, evaluate_release, publish_release
 
 
+def _complete_tp4_profile_report(profile, source_sha_by_name, expected_layers=1):
+    def boundary_row(layer, rank, stage):
+        check = {
+            "source_tensor": "canonical/{}".format(stage.lower()),
+            "candidate_tensor": "rank{}/{}".format(rank, stage.lower()),
+            "source_shape": [1],
+            "expected_compared_shape": [1],
+            "actual_shape": [1],
+            "dtype": "int16",
+            "expected_dtype": "int16",
+            "actual_dtype": "int16",
+            "comparison_method": "BITWISE_ELEMENTWISE",
+            "compared_elements": 1,
+            "expected_sha256": "a" * 64,
+            "actual_sha256": "a" * 64,
+            "mismatch_count": 0,
+            "max_absolute_difference": 0.0,
+            "mismatches": [],
+        }
+        return {
+            "layer": layer,
+            "rank": rank,
+            "stage": stage,
+            "comparison_method": "BITWISE_ELEMENTWISE",
+            "compared_elements": 1,
+            "mismatch_count": 0,
+            "max_absolute_difference": 0.0,
+            "checks": [check],
+        }
+
+    return {
+        "profile": profile,
+        "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+        "backend": "mtk_converter.python.tools.tflite_executor.TFLiteExecutor",
+        "simulate_fp16": False,
+        "required_stages": list(_TP4_GOLDEN_STAGES),
+        "source_sha256_by_name": dict(source_sha_by_name),
+        "candidate_sha256": {},
+        "fixture_sha256_by_layer": {
+            str(layer): "f" * 64 for layer in range(expected_layers)
+        },
+        "boundary_results": [
+            boundary_row(layer, rank, stage)
+            for layer in range(expected_layers)
+            for rank in range(4)
+            for stage in _TP4_GOLDEN_STAGES
+        ],
+        "golden_coverage": {
+            "complete": True,
+            "layers": list(range(expected_layers)),
+            "ranks": list(range(4)),
+            "components": list(_TP4_LAYER_COMPONENTS),
+        },
+        "numerical_status": "NUMERICAL_PASS",
+        "mismatch_count": 0,
+        "mismatches": [],
+    }
+
+
 class EvidenceScopedRewriteTests(unittest.TestCase):
-    def test_mlp_gate_padding_scope_is_limited_to_tp4_p128(self):
+    def test_mlp_width_rewrite_is_applied_only_to_proven_tp4_p128_profile(self):
         self.assertEqual(_scoped_mlp_gate_padding(4, "P128", 2), 2)
         self.assertIsNone(_scoped_mlp_gate_padding(4, "D1", 2))
         self.assertIsNone(_scoped_mlp_gate_padding(2, "P128", 2))
+        self.assertIsNone(_scoped_mlp_gate_padding(2, "D1", 2))
         self.assertIsNone(_scoped_mlp_gate_padding(4, "P128", None))
 
 
@@ -519,7 +582,7 @@ class AutoRepairTests(unittest.TestCase):
                 "actual": 8,
             }],
         }
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             candidate_root = Path(directory) / "candidate"
             candidate_root.mkdir()
             original_payload = b"stale-tp2-rank-component"
@@ -630,7 +693,7 @@ class AutoRepairTests(unittest.TestCase):
                 "projection": "q",
             }],
         }
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             candidate_root = Path(directory) / "candidate"
             candidate_root.mkdir()
             old_payload = b"stale-rank-component"
@@ -650,29 +713,38 @@ class AutoRepairTests(unittest.TestCase):
 
             def rebuild(source_path, output_directory, **kwargs):
                 output_directory.mkdir()
-                new_payload = b"canonical-rebuilt-rank-component"
-                (output_directory / "model.tflite").write_bytes(new_payload)
+                models = []
+                for rank in range(4):
+                    for component in _TP4_LAYER_COMPONENTS:
+                        relative = Path("rank{}".format(rank)) / "layer00" / (component + ".tflite")
+                        model_path = output_directory / relative
+                        model_path.parent.mkdir(parents=True, exist_ok=True)
+                        new_payload = "rank={};component={}".format(rank, component).encode("ascii")
+                        model_path.write_bytes(new_payload)
+                        models.append({
+                            "path": relative.as_posix(),
+                            "rank": rank,
+                            "layer": 0,
+                            "component": component,
+                            "source_sha256": source_sha,
+                            "output_sha256": hashlib.sha256(new_payload).hexdigest(),
+                            "structural_status": "STRUCTURAL_PASS",
+                        })
                 rebuilt = {
                     "profile": "D1",
                     "topology": "TP4_FOUR_STAGE_ALL_GATHER",
                     "expected_layers": 1,
+                    "structural_status": "STRUCTURAL_PASS",
+                    "weight_reconstruction": "PASS",
                     "source_audit": {"sources": [source_row]},
                     "layer_manifest_sha256": {},
                     "checksums_file": "SHA256SUMS",
-                    "models": [{
-                        "path": "model.tflite",
-                        "output_sha256": hashlib.sha256(new_payload).hexdigest(),
-                    }],
+                    "models": models,
+                    "model_count": len(models),
                 }
                 return rebuilt
 
-            golden_pass = {
-                "fixture_sha256_by_layer": {"0": "f" * 64},
-                "numerical_status": "NUMERICAL_PASS",
-                "mismatch_count": 0,
-                "mismatches": [],
-                "backend": "synthetic",
-            }
+            golden_pass = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
             with patch.object(pipeline, "build_tp4_directory", side_effect=rebuild), patch.object(
                 pipeline, "run_tp4_profile_golden", return_value=golden_pass
             ):
@@ -694,9 +766,59 @@ class AutoRepairTests(unittest.TestCase):
             backup_exists = backup.is_dir()
 
         self.assertEqual(finalized["auto_repair_report"]["status"], "REPAIRED_AND_VERIFIED")
+        self.assertEqual(finalized["numerical_status"], "NUMERICAL_PASS")
         self.assertTrue(backup_exists)
         self.assertTrue(report_exists)
         self.assertIn(finalized["auto_repair_report_sha256"], checksums)
+
+    def test_tp4_auto_repair_blocks_zero_mismatch_partial_probe(self):
+        import json
+
+        source_sha = "a" * 64
+        source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
+        source_report = SimpleNamespace(
+            to_dict=lambda include_quant_values=False: {"sources": [source_row]}
+        )
+        partial_golden = {
+            "profile": "D1",
+            "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+            "fixture_sha256_by_layer": {"0": "f" * 64},
+            "source_sha256_by_name": {"layer00.tflite": source_sha},
+            "numerical_status": "NUMERICAL_PASS",
+            "mismatch_count": 0,
+            "mismatches": [],
+        }
+        with TemporaryDirectory() as directory:
+            candidate_root = Path(directory) / "candidate"
+            candidate_root.mkdir()
+            report_path = candidate_root / "GOLDEN_REPORT.json"
+            report_path.write_text(json.dumps(partial_golden), encoding="utf-8")
+            manifest = {
+                "profile": "D1",
+                "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+                "expected_layers": 1,
+                "golden_report_path": report_path.name,
+                "source_audit": {"sources": [source_row]},
+                "models": [],
+                "checksums_file": "SHA256SUMS",
+            }
+            finalized = _auto_repair_tp4_candidate(
+                "canonical-d1",
+                candidate_root,
+                manifest,
+                source_report,
+                "D1",
+                1,
+                object(),
+                1,
+            )
+        self.assertEqual(finalized["auto_repair_report"]["status"], "REPAIR_BLOCKED")
+        self.assertEqual(
+            finalized["auto_repair_report"]["failure"],
+            "GOLDEN_REPORT_NOT_FULLY_VERIFIED",
+        )
+        self.assertEqual(finalized["auto_repair_report"]["attempts"], [])
+        self.assertEqual(finalized["release_status"], "NOT_ELIGIBLE")
 
     def test_rebuild_from_canonical_is_retested_before_pass(self):
         source_sha = "a" * 64
@@ -982,18 +1104,26 @@ class ReleaseGateTests(unittest.TestCase):
     def test_release_golden_requires_fixture_identity_for_every_layer(self):
         import json
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             expected_sources = {"layer00.tflite": "a" * 64}
             report = {
+                "profile": "D1",
+                "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+                "backend": "mtk_converter.python.tools.tflite_executor.TFLiteExecutor",
+                "simulate_fp16": False,
                 "numerical_status": "NUMERICAL_PASS",
                 "mismatch_count": 0,
+                "mismatches": [],
                 "source_sha256_by_name": expected_sources,
+                "candidate_sha256": {},
                 "fixture_sha256_by_layer": {"0": "f" * 64},
             }
             report_path = root / "GOLDEN_REPORT.json"
             report_path.write_text(json.dumps(report), encoding="utf-8")
             manifest = {
+                "profile": "D1",
+                "topology": "TP4_FOUR_STAGE_ALL_GATHER",
                 "golden_report_path": report_path.name,
                 "golden_report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
                 "expected_layers": 2,
@@ -1008,7 +1138,7 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(failure, "GOLDEN_FIXTURE_COVERAGE_INCOMPLETE")
 
     def test_golden_unavailable_fails_and_publishes_nothing(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory) / "candidate"
             root.mkdir()
             rows = []
@@ -1079,7 +1209,7 @@ class ReleaseGateTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def test_top_level_cli_contract(self):
+    def test_issue24_top_level_cli_contract(self):
         args = build_parser().parse_args([
             "--prefill", "./canonical/prefill128",
             "--decode", "./canonical/decode1",
@@ -1096,6 +1226,21 @@ class CliTests(unittest.TestCase):
         self.assertTrue(args.auto_repair)
         self.assertEqual(args.max_repairs, 4)
 
+    def test_top_level_cli_accepts_tp8_and_independent_token_counts(self):
+        args = build_parser().parse_args([
+            "--prefill", "./canonical/prefill",
+            "--decode", "./canonical/decode",
+            "--tp", "8",
+            "--prefill-tokens", "16",
+            "--decode-tokens", "4",
+            "--expected-layers", "16",
+            "--output", "./output/tp8",
+        ])
+        self.assertEqual(args.tp, "8")
+        self.assertEqual(args.prefill_tokens, 16)
+        self.assertEqual(args.decode_tokens, 4)
+        self.assertEqual(args.expected_layers, 16)
+
 
 class GoldenBackendTests(unittest.TestCase):
     def test_tp2_pipeline_records_golden_unavailable_instead_of_zero_mismatch(self):
@@ -1103,14 +1248,17 @@ class GoldenBackendTests(unittest.TestCase):
         import tflite_tp.pipeline as pipeline
         import json
 
-        def discovered(_path, expected_layers):
+        phase_calls = []
+
+        def discovered(path, expected_layers, phase=None):
             self.assertEqual(expected_layers, 1)
+            phase_calls.append((path, phase))
             return SimpleNamespace(
                 structural_pass=True,
                 issues=(),
                 coverage={
-                    "P128": {"complete": True},
-                    "D1": {"complete": True},
+                    "P16": {"complete": True},
+                    "D4": {"complete": True},
                 },
                 sources=(),
                 to_dict=lambda include_quant_values=False: {"sources": []},
@@ -1153,7 +1301,7 @@ class GoldenBackendTests(unittest.TestCase):
                 "release_status": "NOT_ELIGIBLE",
             }
 
-        with tempfile.TemporaryDirectory() as directory, patch.object(
+        with TemporaryDirectory() as directory, patch.object(
             pipeline, "discover_path", side_effect=discovered
         ), patch.object(pipeline, "build_tp2_directory", side_effect=build_tp2), patch.object(
             pipeline,
@@ -1167,6 +1315,8 @@ class GoldenBackendTests(unittest.TestCase):
                 Path(directory) / "output",
                 expected_layers=1,
                 auto_repair=True,
+                prefill_tokens=16,
+                decode_tokens=4,
             )
             diagnostics = [
                 json.loads((Path(item["root"]) / "GOLDEN_DIAGNOSTIC.json").read_text(encoding="utf-8"))
@@ -1174,6 +1324,7 @@ class GoldenBackendTests(unittest.TestCase):
             ]
 
         self.assertEqual(result["release_gate"], "FAIL")
+        self.assertEqual(phase_calls, [("canonical-p128", "prefill"), ("canonical-d1", "decode")])
         self.assertEqual(result["numerical_status"], "GOLDEN_EXECUTION_UNAVAILABLE")
         self.assertIsNone(result["mismatch_count"])
         self.assertEqual(len(diagnostics), 2)
@@ -1183,7 +1334,7 @@ class GoldenBackendTests(unittest.TestCase):
     def test_tp2_missing_golden_runner_writes_unproven_row_reduce_diagnostic(self):
         import json
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             root.mkdir(exist_ok=True)
             manifest = {
@@ -1216,56 +1367,202 @@ class GoldenBackendTests(unittest.TestCase):
         self.assertIn(finalized["golden_diagnostic_sha256"], checksums)
 
     def test_tp4_golden_finalizer_binds_report_sha_and_release_state(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
+            source_sha = "a" * 64
+            candidate_path = "d1/rank0/layer00/attn.tflite"
+            candidate_sha = "b" * 64
+            source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
             manifest = {
                 "profile": "D1",
+                "topology": "TP4_FOUR_STAGE_ALL_GATHER",
                 "expected_layers": 1,
-                "models": [],
+                "source_audit": {"sources": [source_row]},
+                "models": [{
+                    "profile": "D1",
+                    "path": candidate_path,
+                    "output_sha256": candidate_sha,
+                }],
                 "layer_manifest_sha256": {},
                 "checksums_file": "SHA256SUMS",
             }
-            report = {
-                "fixture_sha256_by_layer": {"0": "f" * 64},
-                "numerical_status": "NUMERICAL_PASS",
-                "mismatch_count": 0,
-                "backend": "synthetic",
-                "mismatches": [],
-            }
+            report = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
+            report["candidate_sha256"] = {candidate_path: candidate_sha}
             finalized = _finalize_tp4_golden(root, manifest, report)
             report_path = root / "GOLDEN_REPORT.json"
             digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
             checksum_rows = (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
         self.assertEqual(finalized["numerical_status"], "NUMERICAL_PASS")
-        self.assertEqual(finalized["release_status"], "RELEASE_PASS")
+        self.assertEqual(finalized["release_status"], "NUMERICAL_PASS_RELEASE_PENDING")
+        self.assertEqual(finalized["host_verification_status"], "HOST_VERIFIED")
         self.assertEqual(finalized["release_verification_scope"], "HOST_CANONICAL_GOLDEN")
         self.assertEqual(finalized["npu_verification_status"], "NPU_UNVERIFIED")
         self.assertEqual(finalized["golden_report_sha256"], digest)
         self.assertIn("{}  GOLDEN_REPORT.json".format(digest), checksum_rows)
 
     def test_tp4_golden_finalizer_blocks_zero_mismatch_without_fixture_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
+        import json
+
+        with TemporaryDirectory() as directory:
             root = Path(directory)
+            source_sha = "a" * 64
+            source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
             manifest = {
                 "profile": "D1",
+                "topology": "TP4_FOUR_STAGE_ALL_GATHER",
                 "expected_layers": 1,
+                "source_audit": {"sources": [source_row]},
                 "models": [],
                 "layer_manifest_sha256": {},
             }
-            report = {
-                "numerical_status": "NUMERICAL_PASS",
-                "mismatch_count": 0,
-                "backend": "synthetic",
-                "mismatches": [],
-            }
+            report = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
+            report.pop("fixture_sha256_by_layer")
             finalized = _finalize_tp4_golden(root, manifest, report)
-        self.assertEqual(finalized["numerical_status"], "NUMERICAL_PASS")
+            saved_report = json.loads((root / "GOLDEN_REPORT.json").read_text(encoding="utf-8"))
+        self.assertEqual(finalized["numerical_status"], "NUMERICAL_INCOMPLETE")
         self.assertEqual(finalized["release_status"], "NOT_ELIGIBLE")
         self.assertEqual(finalized["numerical_gate"]["code"], "GOLDEN_FIXTURE_IDENTITY_MISSING")
         self.assertEqual(finalized["auto_repair_report"]["status"], "BLOCKED")
+        self.assertEqual(saved_report["numerical_status"], "NUMERICAL_INCOMPLETE")
+        self.assertEqual(saved_report["first_failure"], "GOLDEN_FIXTURE_IDENTITY_MISSING")
+
+    def test_tp4_golden_finalizer_blocks_zero_mismatch_with_missing_stage_boundary(self):
+        import json
+
+        source_sha = "a" * 64
+        source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
+        manifest = {
+            "profile": "D1",
+            "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+            "expected_layers": 1,
+            "source_audit": {"sources": [source_row]},
+            "models": [],
+            "layer_manifest_sha256": {},
+        }
+        report = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
+        report["boundary_results"].pop()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            finalized = _finalize_tp4_golden(root, manifest, report)
+            saved_report = json.loads((root / "GOLDEN_REPORT.json").read_text(encoding="utf-8"))
+        self.assertEqual(finalized["numerical_status"], "NUMERICAL_INCOMPLETE")
+        self.assertEqual(finalized["release_status"], "NOT_ELIGIBLE")
+        self.assertEqual(
+            finalized["numerical_gate"]["code"],
+            "GOLDEN_BOUNDARY_COVERAGE_INCOMPLETE",
+        )
+        self.assertEqual(saved_report["numerical_status"], "NUMERICAL_INCOMPLETE")
+
+    def test_tp4_golden_finalizer_requires_nonempty_bitwise_comparison_evidence(self):
+        import json
+
+        source_sha = "a" * 64
+        source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
+        cases = (
+            ("missing checks", "GOLDEN_BOUNDARY_COMPARISON_EVIDENCE_MISSING"),
+            ("empty tensor", "GOLDEN_BOUNDARY_ELEMENT_COUNT_INVALID"),
+            ("output hash mismatch", "GOLDEN_BOUNDARY_HASH_MISMATCH"),
+            ("nonzero difference", "GOLDEN_BOUNDARY_NOT_BITEXACT"),
+        )
+        for case, expected_failure in cases:
+            with self.subTest(case=case), TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = {
+                    "profile": "D1",
+                    "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+                    "expected_layers": 1,
+                    "source_audit": {"sources": [source_row]},
+                    "models": [],
+                    "layer_manifest_sha256": {},
+                }
+                report = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
+                row = report["boundary_results"][0]
+                check = row["checks"][0]
+                if case == "missing checks":
+                    row["checks"] = []
+                elif case == "empty tensor":
+                    check["expected_compared_shape"] = [0]
+                    check["actual_shape"] = [0]
+                    check["compared_elements"] = 0
+                    row["compared_elements"] = 0
+                elif case == "output hash mismatch":
+                    check["actual_sha256"] = "b" * 64
+                else:
+                    row["max_absolute_difference"] = 1
+                finalized = _finalize_tp4_golden(root, manifest, report)
+                saved_report = json.loads((root / "GOLDEN_REPORT.json").read_text(encoding="utf-8"))
+                self.assertEqual(finalized["numerical_status"], "NUMERICAL_INCOMPLETE")
+                self.assertEqual(finalized["numerical_gate"]["code"], expected_failure)
+                self.assertEqual(saved_report["first_failure"], expected_failure)
+
+    def test_tp4_golden_finalizer_requires_registered_backend_and_execution_mode(self):
+        source_sha = "a" * 64
+        source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
+        cases = (
+            ("missing backend", "backend", None, "GOLDEN_BACKEND_UNVERIFIED"),
+            ("unknown backend", "backend", "synthetic-unit-test", "GOLDEN_BACKEND_UNVERIFIED"),
+            ("fp16 simulation", "simulate_fp16", True, "GOLDEN_EXECUTION_MODE_UNVERIFIED"),
+            ("missing execution mode", "simulate_fp16", None, "GOLDEN_EXECUTION_MODE_UNVERIFIED"),
+        )
+        for name, key, value, expected_failure in cases:
+            with self.subTest(case=name), TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = {
+                    "profile": "D1",
+                    "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+                    "expected_layers": 1,
+                    "source_audit": {"sources": [source_row]},
+                    "models": [],
+                    "layer_manifest_sha256": {},
+                }
+                report = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
+                if value is None:
+                    report.pop(key, None)
+                else:
+                    report[key] = value
+                finalized = _finalize_tp4_golden(root, manifest, report)
+                saved_report = json.loads((root / "GOLDEN_REPORT.json").read_text(encoding="utf-8"))
+            self.assertEqual(finalized["numerical_status"], "NUMERICAL_INCOMPLETE")
+            self.assertEqual(finalized["numerical_gate"]["code"], expected_failure)
+            self.assertEqual(saved_report["first_failure"], expected_failure)
+
+    def test_tp4_golden_finalizer_binds_every_candidate_sha_to_manifest(self):
+        source_sha = "a" * 64
+        source_row = {"source": "layer00.tflite", "source_sha256": source_sha, "profiles": ["D1"]}
+        candidate_path = "d1/rank0/layer00/attn.tflite"
+        cases = (
+            ("missing candidate mapping", None, "GOLDEN_CANDIDATE_SHA_COVERAGE_INCOMPLETE"),
+            ("stale candidate digest", {candidate_path: "c" * 64}, "GOLDEN_CANDIDATE_SHA_MAPPING_MISMATCH"),
+            ("invalid candidate digest", {candidate_path: "not-a-sha"}, "GOLDEN_CANDIDATE_SHA_INVALID"),
+        )
+        for name, candidate_mapping, expected_failure in cases:
+            with self.subTest(case=name), TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = {
+                    "profile": "D1",
+                    "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+                    "expected_layers": 1,
+                    "source_audit": {"sources": [source_row]},
+                    "models": [{
+                        "profile": "D1",
+                        "path": candidate_path,
+                        "output_sha256": "b" * 64,
+                    }],
+                    "layer_manifest_sha256": {},
+                }
+                report = _complete_tp4_profile_report("D1", {"layer00.tflite": source_sha})
+                if candidate_mapping is None:
+                    report["candidate_sha256"] = {}
+                else:
+                    report["candidate_sha256"] = candidate_mapping
+                finalized = _finalize_tp4_golden(root, manifest, report)
+                saved_report = json.loads((root / "GOLDEN_REPORT.json").read_text(encoding="utf-8"))
+            self.assertEqual(finalized["numerical_status"], "NUMERICAL_INCOMPLETE")
+            self.assertEqual(finalized["numerical_gate"]["code"], expected_failure)
+            self.assertEqual(saved_report["first_failure"], expected_failure)
 
     def test_tp4_golden_finalizer_keeps_mismatches_blocked(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = {"profile": "D1", "models": [], "layer_manifest_sha256": {}}
             report = {
@@ -1478,7 +1775,7 @@ class GoldenBackendTests(unittest.TestCase):
                     outputs = {"hidden": inputs["res"] + inputs["down"]}
                 return {"outputs": outputs}
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.tflite"
             source.write_bytes(b"canonical source")
@@ -1550,6 +1847,13 @@ class GoldenBackendTests(unittest.TestCase):
             "Q", "K", "V", "ATTENTION_CONTEXT", "O", "SWIGLU", "DOWN", "RESIDUAL_HIDDEN", "KV_OUTPUT"
         ])
         self.assertTrue(all(row["mismatch_count"] == 0 for row in report["boundary_results"]))
+        self.assertTrue(all(row["compared_elements"] > 0 for row in report["boundary_results"]))
+        for row in report["boundary_results"]:
+            self.assertEqual(row["comparison_method"], "BITWISE_ELEMENTWISE")
+            self.assertTrue(row["checks"])
+            for check in row["checks"]:
+                self.assertEqual(check["expected_sha256"], check["actual_sha256"])
+                self.assertGreater(check["compared_elements"], 0)
 
     def test_tp4_profile_golden_chains_canonical_hidden_and_covers_every_stage(self):
         component_specs = {
@@ -1571,7 +1875,7 @@ class GoldenBackendTests(unittest.TestCase):
             ),
         }
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             source_dir = root / "sources"
             candidate_root = root / "candidate"
@@ -1753,7 +2057,7 @@ class GoldenBackendTests(unittest.TestCase):
         import json
         from test_discovery import synthetic_grouped_transformer_model
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             source_path = root / "grouped.tflite"
             source_path.write_bytes(b"grouped canonical source")
@@ -1899,7 +2203,7 @@ class GoldenBackendTests(unittest.TestCase):
         from test_discovery import synthetic_grouped_transformer_model
         import tflite_tp.tflite_rewriter as rewriter
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             source_root = root / "sources"
             source_root.mkdir()
@@ -1966,11 +2270,11 @@ class GoldenBackendTests(unittest.TestCase):
         self.assertEqual([row["layer"] for row in aggregate["models"][24:]], [1] * 24)
         self.assertEqual(aggregate["structural_status"], "STRUCTURAL_PASS")
 
-    def test_tp2_directory_builder_preserves_unproven_row_reduce_evidence_per_layer(self):
+    def test_tp2_directory_builder_keeps_layer_and_aggregate_all_gather_topology_aligned(self):
         from test_discovery import synthetic_grouped_transformer_model
         import tflite_tp.tflite_rewriter as rewriter
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
             source_root = root / "sources"
             source_root.mkdir()
@@ -1994,8 +2298,12 @@ class GoldenBackendTests(unittest.TestCase):
                 def load(self, path):
                     return SimpleNamespace(subgraphs=[object()])
 
-            def fake_build_layer(model_object, model_info, layer, analysis, output_directory, degree, schema_module=None):
+            layer_topologies = []
+
+            def fake_build_layer(model_object, model_info, layer, analysis, output_directory, degree, schema_module=None, topology=None):
                 self.assertEqual(degree, 2)
+                self.assertEqual(topology, "all-gather")
+                layer_topologies.append(topology)
                 models = []
                 for rank in range(2):
                     for component in ("attn", "o", "suffix_attn", "mlp", "down", "suffix_final"):
@@ -2015,17 +2323,11 @@ class GoldenBackendTests(unittest.TestCase):
                         })
                 return {
                     "models": models,
+                    "topology": "TP2_FOUR_STAGE_ALL_GATHER",
                     "numerical_gate": {"status": "GOLDEN_EXECUTION_UNAVAILABLE"},
                     "quantization_contract": {"verified": True},
                     "weight_partitions": {},
-                    "collective_contract": {
-                        "quantized_partial_semantics": {
-                            "status": "UNPROVEN",
-                            "proof_sha256": None,
-                            "partial_output_dtype": {"o": "INT16", "down": "INT16"},
-                            "layer": layer.layer_id,
-                        },
-                    },
+                    "collective_contract": {"row_reduce_boundaries": []},
                 }
 
             with patch.object(rewriter, "TFLiteObjectAdapter", FakeAdapter), patch.object(
@@ -2039,12 +2341,10 @@ class GoldenBackendTests(unittest.TestCase):
                     discovery_report=source_report,
                 )
 
-        partial_semantics = aggregate["collective_contract"]["quantized_partial_semantics"]
         self.assertEqual(aggregate["model_count"], 2 * 2 * 6)
-        self.assertEqual(partial_semantics["status"], "UNPROVEN")
-        self.assertIsNone(partial_semantics["proof_sha256"])
-        self.assertEqual(sorted(partial_semantics["per_layer"]), ["0", "1"])
-        self.assertEqual(partial_semantics["per_layer"]["1"]["partial_output_dtype"]["o"], "INT16")
+        self.assertEqual(aggregate["topology"], "TP2_FOUR_STAGE_ALL_GATHER")
+        self.assertEqual(aggregate["collective_contract"]["row_reduce_boundaries"], [])
+        self.assertEqual(layer_topologies, ["all-gather", "all-gather"])
 
     def test_mtk_executor_is_reported_as_candidate_not_tp_golden_pass(self):
         mtk_module = "mtk_converter.python.tools.tflite_executor"
@@ -2078,7 +2378,7 @@ class GoldenBackendTests(unittest.TestCase):
                 return [values[name] for name in names]
 
         self_inputs = []
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             source = Path(directory) / "source.tflite"
             source.write_bytes(b"canonical tflite")
             inputs = {"x": np.array([[4, 5]], dtype=np.int16)}
@@ -2111,7 +2411,7 @@ class GoldenBackendTests(unittest.TestCase):
             def run(self, _inputs):
                 return [np.array([1], dtype=np.int16)]
 
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             source = Path(directory) / "source.tflite"
             source.write_bytes(b"canonical tflite")
             runner = MTKConverterTFLiteRunner(executor_factory=FakeExecutor)

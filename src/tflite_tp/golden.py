@@ -129,7 +129,7 @@ class MTKConverterTFLiteRunner:
                     )
                 if not scalar_shape_compatibility:
                     raise initial_error
-                fd, temporary_path = tempfile.mkstemp(prefix="tflite-tp-host-shape-", suffix=".tflite")
+                fd, temporary_path = tempfile.mkstemp(prefix="genio-host-shape-", suffix=".tflite")
                 with os.fdopen(fd, "wb") as target:
                     target.write(adapter.export(model))
                 executor = self._executor_factory(
@@ -356,7 +356,9 @@ def _slice_input_for_rank(value, target_shape, rank, degree, tensor_name):
 def _combine_tp4_rank_outputs(name, rank_values, target_shape):
     import numpy as np
 
-    degree = 4
+    degree = len(rank_values)
+    if degree not in (2, 4, 8) or set(rank_values) != set(range(degree)):
+        raise ToolError("GOLDEN_RANK_ORDER_INVALID", repr(sorted(rank_values)))
     target_shape = tuple(int(dimension) for dimension in target_shape)
     values = [np.asarray(rank_values[rank]) for rank in range(degree)]
     if all(tuple(value.shape) == target_shape for value in values):
@@ -607,8 +609,13 @@ def run_tp4_layer_golden(
     contract = candidate_manifest.get("collective_contract", {})
     if contract.get("architecture") != "FOUR_STAGE_ALL_GATHER":
         raise ToolError("GOLDEN_TP4_CONTRACT_INVALID", "expected FOUR_STAGE_ALL_GATHER")
-    if candidate_manifest.get("rank_order") != [0, 1, 2, 3]:
+    ranks = candidate_manifest.get("rank_order")
+    degree = len(ranks) if isinstance(ranks, list) else 0
+    if degree not in (2, 4, 8) or ranks != list(range(degree)):
         raise ToolError("GOLDEN_RANK_ORDER_INVALID", str(candidate_manifest.get("rank_order")))
+    expected_topology = "TP{}_FOUR_STAGE_ALL_GATHER".format(degree)
+    if candidate_manifest.get("topology") not in (None, expected_topology):
+        raise ToolError("GOLDEN_TOPOLOGY_INVALID", str(candidate_manifest.get("topology")))
     stages = [item.get("stage") for item in contract.get("all_gather_boundaries", [])]
     if stages != ["AG0", "AG1", "AG2", "AG3"]:
         raise ToolError("GOLDEN_ALL_GATHER_ORDER_INVALID", repr(stages))
@@ -647,10 +654,10 @@ def run_tp4_layer_golden(
     grouped = {component: {} for component in _TP4_LAYER_COMPONENTS}
     for row in layer_rows:
         component, rank = row.get("component"), row.get("rank")
-        if component not in grouped or rank not in range(4) or rank in grouped[component]:
+        if component not in grouped or rank not in range(degree) or rank in grouped[component]:
             raise ToolError("GOLDEN_COMPONENT_COVERAGE_INVALID", repr((component, rank)))
         grouped[component][rank] = row
-    if any(set(grouped[component]) != set(range(4)) for component in _TP4_LAYER_COMPONENTS):
+    if any(set(grouped[component]) != set(range(degree)) for component in _TP4_LAYER_COMPONENTS):
         raise ToolError("GOLDEN_COMPONENT_COVERAGE_INVALID", str(layer_id))
 
     if source_result is None:
@@ -702,7 +709,7 @@ def run_tp4_layer_golden(
     replicated_mismatch_count = 0
     for component in _TP4_LAYER_COMPONENTS:
         public_names = None
-        for rank in range(4):
+        for rank in range(degree):
             row = grouped[component][rank]
             if str(row.get("source_sha256", "")).lower() != source_hash:
                 raise ToolError("GOLDEN_CANDIDATE_SOURCE_SHA_MISMATCH", str(row.get("path")))
@@ -728,7 +735,7 @@ def run_tp4_layer_golden(
                     value = canonical_values.get(name)
                 if value is None:
                     raise ToolError("GOLDEN_INPUT_MISSING", name)
-                inputs[name] = _slice_input_for_rank(value, port["shape"], rank, 4, name)
+                inputs[name] = _slice_input_for_rank(value, port["shape"], rank, degree, name)
             names = {port.get("name") for port in row.get("io", {}).get("outputs", [])}
             if public_names is None:
                 public_names = names
@@ -752,7 +759,7 @@ def run_tp4_layer_golden(
                 raise ToolError("GOLDEN_OUTPUT_SHAPE_UNRESOLVED", name)
             values = {
                 rank: component_rank_outputs[component][rank][name]
-                for rank in range(4)
+                for rank in range(degree)
             }
             combined, mismatch_count, mismatches = _combine_tp4_rank_outputs(
                 name, values, full_shapes[name]
@@ -783,10 +790,11 @@ def run_tp4_layer_golden(
     boundary_mismatch_count = 0
     boundary_mismatches = []
     if boundary_contract is not None:
-        for rank in range(4):
+        for rank in range(degree):
             for stage in _TP4_GOLDEN_STAGES:
                 check_results = []
                 stage_mismatch_count = 0
+                stage_compared_elements = 0
                 stage_max_difference = 0.0
                 stage_difference_available = True
                 for check in boundary_contract[stage]:
@@ -808,14 +816,22 @@ def run_tp4_layer_golden(
                             expected_value,
                             actual_value.shape,
                             rank,
-                            4,
+                            degree,
                             source_name,
                         )
                     compared_boundary = compare_named_outputs(
                         {"boundary": expected_value},
                         {"boundary": actual_value},
                     )
+                    expected_bytes = np.ascontiguousarray(expected_value).tobytes()
+                    actual_bytes = np.ascontiguousarray(actual_value).tobytes()
+                    same_contract = (
+                        expected_value.shape == actual_value.shape
+                        and expected_value.dtype == actual_value.dtype
+                    )
+                    compared_elements = int(expected_value.size) if same_contract else 0
                     stage_mismatch_count += compared_boundary["mismatch_count"]
+                    stage_compared_elements += compared_elements
                     difference = compared_boundary["max_absolute_difference"]
                     if difference is None:
                         stage_difference_available = False
@@ -828,8 +844,15 @@ def run_tp4_layer_golden(
                         "candidate_tensor": candidate_name,
                         "distribution": check["distribution"],
                         "source_shape": list(np.asarray(canonical_values[source_name]).shape),
+                        "expected_compared_shape": list(expected_value.shape),
                         "actual_shape": list(actual_value.shape),
                         "dtype": str(actual_value.dtype),
+                        "expected_dtype": str(expected_value.dtype),
+                        "actual_dtype": str(actual_value.dtype),
+                        "comparison_method": "BITWISE_ELEMENTWISE",
+                        "compared_elements": compared_elements,
+                        "expected_sha256": hashlib.sha256(expected_bytes).hexdigest(),
+                        "actual_sha256": hashlib.sha256(actual_bytes).hexdigest(),
                         "quant_domain": quant_domain,
                         "mismatch_count": compared_boundary["mismatch_count"],
                         "max_absolute_difference": difference,
@@ -857,6 +880,8 @@ def run_tp4_layer_golden(
                     "layer": int(layer_id),
                     "rank": rank,
                     "stage": stage,
+                    "comparison_method": "BITWISE_ELEMENTWISE",
+                    "compared_elements": stage_compared_elements,
                     "mismatch_count": stage_mismatch_count,
                     "max_absolute_difference": (
                         stage_max_difference if stage_difference_available else None
@@ -873,14 +898,14 @@ def run_tp4_layer_golden(
     return {
         "profile": profile,
         "layer": int(layer_id),
-        "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+        "topology": candidate_manifest.get("topology"),
         "backend": source_result.get("backend"),
         "simulate_fp16": source_result.get("simulate_fp16"),
         "source_sha256": source_hash,
         "fixture_sha256": source_result.get("fixture_sha256"),
         "candidate_sha256": candidate_hashes,
         "stitched_outputs": global_outputs,
-        "rank_component_execution_count": 24,
+        "rank_component_execution_count": degree * len(_TP4_LAYER_COMPONENTS),
         "required_stages": list(_TP4_GOLDEN_STAGES) if boundary_contract is not None else [],
         "boundary_results": boundary_results,
         "public_output_mismatch_count": compared["mismatch_count"],
@@ -1143,7 +1168,7 @@ def run_tp4_profile_golden(source_report, candidate_root, candidate_manifest, pr
     return {
         "schema": 1,
         "profile": profile,
-        "topology": "TP4_FOUR_STAGE_ALL_GATHER",
+        "topology": candidate_manifest.get("topology"),
         "backend": layer_reports[0].get("backend") if layer_reports else None,
         "simulate_fp16": layer_reports[0].get("simulate_fp16") if layer_reports else None,
         "seed": seed,
@@ -1161,7 +1186,7 @@ def run_tp4_profile_golden(source_report, candidate_root, candidate_manifest, pr
         "golden_coverage": {
             "complete": len(layer_reports) == expected_layers and not missing_layers,
             "layers": [report["layer"] for report in layer_reports],
-            "ranks": list(range(4)),
+            "ranks": list(candidate_manifest.get("rank_order", [])),
             "components": list(_TP4_LAYER_COMPONENTS),
         },
         "mismatch_count": mismatch_count,

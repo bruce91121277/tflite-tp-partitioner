@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from collections import defaultdict, deque
 import hashlib
 import math
+import re
 import struct
 
 from .errors import ModelValidationError
@@ -131,6 +132,9 @@ class LayerDiscovery:
     roles: Dict[str, ProjectionMatch] = field(default_factory=dict)
     issues: List[Tuple[str, str]] = field(default_factory=list)
     graph_features: Dict[str, bool] = field(default_factory=dict)
+    query_heads: Optional[int] = None
+    kv_heads: Optional[int] = None
+    head_dim: Optional[int] = None
 
     @property
     def complete(self):
@@ -188,6 +192,11 @@ class DiscoveryReport:
                             "graph_index": layer.graph_index,
                             "profile": layer.profile,
                             "complete": layer.complete,
+                            "head_geometry": {
+                                "query_heads": layer.query_heads,
+                                "kv_heads": layer.kv_heads,
+                                "head_dim": layer.head_dim,
+                            },
                             "roles": {
                                 role: {
                                     "weight_tensor": item.tensor_index,
@@ -225,16 +234,10 @@ class DiscoveryReport:
 
 PROJECTION_ROLES = ("q", "k", "v", "o", "gate", "up", "down")
 
-EXPECTED_WEIGHT_SHAPES = {
-    "q": (4096, 4096),
-    "k": (1024, 4096),
-    "v": (1024, 4096),
-    "o": (4096, 4096),
-    "gate": (14336, 4096),
-    "up": (14336, 4096),
-    "down": (4096, 14336),
-}
 
+def profile_token_count(profile):
+    match = re.fullmatch(r"[PD]([1-9]\d*)", profile or "")
+    return int(match.group(1)) if match else None
 
 def _quant_vector_digest(values, format_character):
     if not values:
@@ -383,3 +386,6 @@ def validate_graph(model, graph):
 
     if issues:
         raise ModelValidationError(issues)
+
+# Legacy shape reference used by synthetic fixtures; discovery derives actual dimensions.
+EXPECTED_WEIGHT_SHAPES = {"q": (4096, 4096), "k": (1024, 4096), "v": (1024, 4096), "o": (4096, 4096), "gate": (14336, 4096), "up": (14336, 4096), "down": (4096, 14336)}

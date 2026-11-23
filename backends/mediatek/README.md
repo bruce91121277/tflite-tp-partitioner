@@ -1,4 +1,4 @@
-# Mediatek NPU verification backend
+# MediaTek NPU verification backend
 
 This optional backend adapts TFLite contracts and input captures, stages
 user-provided artifacts, invokes externally installed NCC/Neuron Runtime

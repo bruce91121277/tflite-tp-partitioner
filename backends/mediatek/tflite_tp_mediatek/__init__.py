@@ -1,1 +1,1 @@
-"""Optional Mediatek verification tools for TFLite TP candidates."""
+"""Optional MediaTek verification tools for TFLite TP candidates."""

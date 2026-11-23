@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 import re
 
 from .errors import ToolError
-from .model import GraphInfo, LayerDiscovery, ModelInfo
+from .model import GraphInfo, LayerDiscovery, ModelInfo, profile_token_count
 from .planning import make_partition_plan
 
 
@@ -210,7 +210,7 @@ def derive_tp_components(model: ModelInfo, layer: LayerDiscovery, graph_analysis
     """
     if not layer.complete:
         raise ToolError("LAYER_DISCOVERY_INCOMPLETE", "layer {} is incomplete".format(layer.layer_id))
-    if layer.profile not in ("P128", "D1"):
+    if profile_token_count(layer.profile) is None:
         raise ToolError("PROFILE_UNSUPPORTED", layer.profile)
     if graph_analysis.layer_id != layer.layer_id:
         raise ToolError("GRAPH_ANALYSIS_LAYER_MISMATCH", "analysis and layer IDs differ")
@@ -218,8 +218,8 @@ def derive_tp_components(model: ModelInfo, layer: LayerDiscovery, graph_analysis
         "rmsnorm", "rotary", "attention", "swiglu", "residual", "mask", "position", "kv_cache", "layer_boundaries"
     )):
         raise ToolError("UNSUPPORTED_GRAPH_VARIANT", "required transformer graph features were not all proven")
-    if degree not in (2, 4):
-        raise ToolError("TP_DEGREE_UNSUPPORTED", "supported tensor-parallel degrees are 2 and 4")
+    if degree not in (2, 4, 8):
+        raise ToolError("TP_DEGREE_UNSUPPORTED", "supported tensor-parallel degrees are 2, 4 and 8")
     make_partition_plan(layer, degree=degree)
     if layer.graph_index < 0 or layer.graph_index >= len(model.graphs):
         raise ToolError("GRAPH_INDEX_OUT_OF_RANGE", str(layer.graph_index))
@@ -235,6 +235,12 @@ def derive_tp_components(model: ModelInfo, layer: LayerDiscovery, graph_analysis
         set(graph.inputs),
         tensors,
     )
+    if degree == 8:
+        dequantize_index = producers.get(layer_input_tensor)
+        if dequantize_index is not None and operators[dequantize_index].opcode.upper() == "DEQUANTIZE":
+            source_indices = [index for index in operators[dequantize_index].inputs if index >= 0]
+            if len(source_indices) == 1 and tensors[source_indices[0]].dtype == "INT16":
+                layer_input_tensor = source_indices[0]
     input_ancestors = _ancestor_operators(layer_input_tensor, operators, producers)
     layer_operator_indices = _ancestor_operators(layer_output_tensor, operators, producers)
     for tensor_index in layer_key_outputs + layer_value_outputs:

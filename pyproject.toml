@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tflite-tp-partitioner"
 version = "0.1.0"
-description = "Experimental TP2/TP4 graph partitioning for W4A16 TFLite models"
+description = "Experimental TP2/TP4/TP8 graph partitioning for W4A16 TFLite models"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
