@@ -1,4 +1,3 @@
-Warning: fs was declared with const; use let for reassignable variables.
 import hashlib
 import json
 import unittest
